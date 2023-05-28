@@ -367,6 +367,7 @@ class LndClient extends BaseClient implements LndClient {
 
       if (cltvDelta) {
         request.setCltvLimit(cltvDelta);
+        this.logger.info(`cltvLimit = ${cltvDelta}`);
       }
 
       if (outgoingChannelId) {

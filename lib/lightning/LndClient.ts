@@ -363,6 +363,8 @@ class LndClient extends BaseClient implements LndClient {
 
       request.setPaymentRequest(invoice);
 
+      request.setAllowSelfPayment(true);
+
       if (cltvDelta) {
         request.setCltvLimit(cltvDelta);
       }

@@ -15,10 +15,10 @@ RUN apt-get -y install \
     libzmq3-dev \
     python3-dev
 
-RUN git clone https://github.com/BoltzExchange/boltz-backend.git
+RUN git clone https://github.com/djkazic/boltz-backend.git
 WORKDIR /boltz-backend
 
-RUN git checkout ${VERSION}
+RUN git checkout master
 RUN npm install -g npm
 
 # Remove dependency that is not needed for the build and unavailable on ARM64

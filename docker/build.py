@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Script for building and pushing the Boltz Docker images."""
+from __future__ import annotations
 import sys
 from argparse import ArgumentParser
 from dataclasses import dataclass
@@ -93,7 +94,7 @@ IMAGES: dict[str, Image] = {
         ],
     ),
     "boltz": Image(
-        tags=["3.2.0"],
+        tags=["3.3.1"],
         arguments=[
             NODE_VERSION,
         ],

@@ -1,6 +1,11 @@
 import { Model, Sequelize, DataTypes } from 'sequelize';
 import Pair from './Pair';
 
+enum NodeType {
+  LND = 0,
+  CLN = 1,
+}
+
 type ReverseSwapType = {
   id: string;
 
@@ -9,7 +14,7 @@ type ReverseSwapType = {
   keyIndex?: number;
   redeemScript?: string;
 
-  claimAddress?: string
+  claimAddress?: string;
 
   fee: number;
   referral?: string;
@@ -24,6 +29,7 @@ type ReverseSwapType = {
 
   timeoutBlockHeight: number;
 
+  node: NodeType;
   invoice: string;
   invoiceAmount: number;
 
@@ -63,6 +69,8 @@ class ReverseSwap extends Model implements ReverseSwapType {
 
   public timeoutBlockHeight!: number;
 
+  public node!: NodeType;
+
   public invoice!: string;
   public invoiceAmount!: number;
 
@@ -82,56 +90,91 @@ class ReverseSwap extends Model implements ReverseSwapType {
   public updatedAt!: Date;
 
   public static load = (sequelize: Sequelize): void => {
-    ReverseSwap.init({
-      id: { type: new DataTypes.STRING(255), primaryKey: true, allowNull: false },
-      lockupAddress: { type: new DataTypes.STRING(255), allowNull: false },
-      keyIndex: { type: new DataTypes.INTEGER(), allowNull: true },
-      redeemScript: { type: new DataTypes.STRING(255), allowNull: true },
-      claimAddress: { type: new DataTypes.STRING(255), allowNull: true },
-      fee: { type: new DataTypes.INTEGER(), allowNull: false },
-      referral: { type: new DataTypes.STRING(255), allowNull: true },
-      minerFee: { type: new DataTypes.INTEGER(), allowNull: true },
-      pair: { type: new DataTypes.STRING(255), allowNull: false },
-      orderSide: { type: new DataTypes.INTEGER(), allowNull: false },
-      status: { type: new DataTypes.STRING(255), allowNull: false },
-      failureReason: { type: new DataTypes.STRING(255), allowNull: true },
-      timeoutBlockHeight: { type: new DataTypes.INTEGER(), allowNull: false },
-      invoice: { type: new DataTypes.STRING(255), allowNull: false, unique: true },
-      invoiceAmount: { type: new DataTypes.INTEGER(), allowNull: false },
-      minerFeeInvoice: { type: new DataTypes.STRING(255), allowNull: true, unique: true },
-      minerFeeInvoicePreimage: { type: new DataTypes.STRING(64), allowNull: true, unique: true },
-      minerFeeOnchainAmount: { type: new DataTypes.INTEGER(), allowNull: true },
-      preimageHash: { type: new DataTypes.STRING(255), allowNull: false, unique: true },
-      preimage: { type: new DataTypes.STRING(255), allowNull: true },
-      onchainAmount: { type: new DataTypes.INTEGER(), allowNull: false },
-      transactionId: { type: new DataTypes.STRING(255), allowNull: true },
-      transactionVout: { type: new DataTypes.INTEGER(), allowNull: true },
-    }, {
-      sequelize,
-      tableName: 'reverseSwaps',
-      indexes: [
-        {
+    ReverseSwap.init(
+      {
+        id: {
+          type: new DataTypes.STRING(255),
+          primaryKey: true,
+          allowNull: false,
+        },
+        lockupAddress: { type: new DataTypes.STRING(255), allowNull: false },
+        keyIndex: { type: new DataTypes.INTEGER(), allowNull: true },
+        redeemScript: { type: new DataTypes.STRING(255), allowNull: true },
+        claimAddress: { type: new DataTypes.STRING(255), allowNull: true },
+        fee: { type: new DataTypes.INTEGER(), allowNull: false },
+        referral: { type: new DataTypes.STRING(255), allowNull: true },
+        minerFee: { type: new DataTypes.INTEGER(), allowNull: true },
+        pair: { type: new DataTypes.STRING(255), allowNull: false },
+        orderSide: { type: new DataTypes.INTEGER(), allowNull: false },
+        status: { type: new DataTypes.STRING(255), allowNull: false },
+        failureReason: { type: new DataTypes.STRING(255), allowNull: true },
+        timeoutBlockHeight: { type: new DataTypes.INTEGER(), allowNull: false },
+        node: {
+          type: new DataTypes.INTEGER(),
+          allowNull: false,
+          validate: {
+            isIn: [
+              Object.values(NodeType).filter((val) => typeof val === 'number'),
+            ],
+          },
+        },
+        invoice: {
+          type: new DataTypes.STRING(255),
+          allowNull: false,
           unique: true,
-          fields: ['id'],
         },
-        {
+        invoiceAmount: { type: new DataTypes.INTEGER(), allowNull: false },
+        minerFeeInvoice: {
+          type: new DataTypes.STRING(255),
+          allowNull: true,
           unique: true,
-          fields: ['preimageHash'],
         },
-        {
+        minerFeeInvoicePreimage: {
+          type: new DataTypes.STRING(64),
+          allowNull: true,
           unique: true,
-          fields: ['invoice'],
         },
-        {
+        minerFeeOnchainAmount: {
+          type: new DataTypes.INTEGER(),
+          allowNull: true,
+        },
+        preimageHash: {
+          type: new DataTypes.STRING(255),
+          allowNull: false,
           unique: true,
-          fields: ['minerFeeInvoice'],
         },
-        {
-          unique: false,
-          fields: ['referral'],
-        },
-      ],
-    });
+        preimage: { type: new DataTypes.STRING(255), allowNull: true },
+        onchainAmount: { type: new DataTypes.INTEGER(), allowNull: false },
+        transactionId: { type: new DataTypes.STRING(255), allowNull: true },
+        transactionVout: { type: new DataTypes.INTEGER(), allowNull: true },
+      },
+      {
+        sequelize,
+        tableName: 'reverseSwaps',
+        indexes: [
+          {
+            unique: true,
+            fields: ['id'],
+          },
+          {
+            unique: true,
+            fields: ['preimageHash'],
+          },
+          {
+            unique: true,
+            fields: ['invoice'],
+          },
+          {
+            unique: true,
+            fields: ['minerFeeInvoice'],
+          },
+          {
+            unique: false,
+            fields: ['referral'],
+          },
+        ],
+      },
+    );
 
     ReverseSwap.belongsTo(Pair, {
       foreignKey: 'pair',
@@ -140,4 +183,4 @@ class ReverseSwap extends Model implements ReverseSwapType {
 }
 
 export default ReverseSwap;
-export { ReverseSwapType };
+export { ReverseSwapType, NodeType };

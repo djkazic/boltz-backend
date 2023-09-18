@@ -7,7 +7,6 @@ import OtpManager from './OtpManager';
 import Service from '../service/Service';
 import DiscordClient from './DiscordClient';
 import { NotificationConfig } from '../Config';
-import { Balance } from '../proto/boltzrpc_pb';
 import { SwapUpdateEvent } from '../consts/Enums';
 import ReferralStats from '../data/ReferralStats';
 import ReverseSwap from '../db/models/ReverseSwap';
@@ -17,8 +16,14 @@ import FeeRepository from '../db/repositories/FeeRepository';
 import SwapRepository from '../db/repositories/SwapRepository';
 import { coinsToSatoshis, satoshisToCoins } from '../DenominationConverter';
 import ReverseSwapRepository from '../db/repositories/ReverseSwapRepository';
-import { getChainCurrency, stringify, splitPairId, formatError } from '../Utils';
 import ChannelCreationRepository from '../db/repositories/ChannelCreationRepository';
+import {
+  formatError,
+  getChainCurrency,
+  getHexString,
+  splitPairId,
+  stringify,
+} from '../Utils';
 
 enum Command {
   Help = 'help',
@@ -47,7 +52,7 @@ type Usage = {
 type CommandInfo = {
   usage?: Usage[];
   description: string;
-  executor: (args: string[]) => Promise<void>
+  executor: (args: string[]) => Promise<void>;
 };
 
 class CommandHandler {
@@ -63,88 +68,126 @@ class CommandHandler {
     private backupScheduler: BackupScheduler,
   ) {
     this.commands = new Map<string, CommandInfo>([
-      [Command.Help, {
-        usage: [
-          {
-            command: 'help [command]',
-            description: 'gets more information about a single command',
-          },
-        ],
-        executor: this.help,
-        description: 'gets a list of all available commands',
-      }],
+      [
+        Command.Help,
+        {
+          usage: [
+            {
+              command: 'help [command]',
+              description: 'gets more information about a single command',
+            },
+          ],
+          executor: this.help,
+          description: 'gets a list of all available commands',
+        },
+      ],
 
-      [Command.GetFees, {
-        executor: this.getFees,
-        description: 'gets accumulated fees',
-      }],
-      [Command.SwapInfo, {
-        usage: [
-          {
-            command: 'swapinfo <id>',
-            description: 'gets all available information about the (reverse) swap with the id `<id>`',
-          },
-        ],
-        executor: this.swapInfo,
-        description: 'gets all available information about a (reverse) swap',
-      }],
-      [Command.GetStats, {
-        executor: this.getStats,
-        description: 'gets stats of all successful swaps',
-      }],
-      [Command.GetBalance, {
-        executor: this.getBalance,
-        description: 'gets the balance of the wallets and channels',
-      }],
-      [Command.LockedFunds, {
-        executor: this.lockedFunds,
-        description: 'gets funds locked up by Boltz',
-      }],
-      [Command.PendingSwaps, {
-        executor: this.pendingSwaps,
-        description: 'gets a list of pending (reverse) swaps',
-      }],
-      [Command.GetReferrals, {
-        executor: this.getReferrals,
-        description: 'gets stats for all referral IDs',
-      }],
+      [
+        Command.GetFees,
+        {
+          executor: this.getFees,
+          description: 'gets accumulated fees',
+        },
+      ],
+      [
+        Command.SwapInfo,
+        {
+          usage: [
+            {
+              command: 'swapinfo <id>',
+              description:
+                'gets all available information about the (reverse) swap with the id `<id>`',
+            },
+          ],
+          executor: this.swapInfo,
+          description: 'gets all available information about a (reverse) swap',
+        },
+      ],
+      [
+        Command.GetStats,
+        {
+          executor: this.getStats,
+          description: 'gets stats of all successful swaps',
+        },
+      ],
+      [
+        Command.GetBalance,
+        {
+          executor: this.getBalance,
+          description: 'gets the balance of the wallets and channels',
+        },
+      ],
+      [
+        Command.LockedFunds,
+        {
+          executor: this.lockedFunds,
+          description: 'gets funds locked up by Boltz',
+        },
+      ],
+      [
+        Command.PendingSwaps,
+        {
+          executor: this.pendingSwaps,
+          description: 'gets a list of pending (reverse) swaps',
+        },
+      ],
+      [
+        Command.GetReferrals,
+        {
+          executor: this.getReferrals,
+          description: 'gets stats for all referral IDs',
+        },
+      ],
 
-      [Command.Backup, {
-        executor: this.backup,
-        description: 'uploads a backup of the databases',
-      }],
-      [Command.Withdraw, {
-        usage: [
-          {
-            command: 'withdraw <OTP token> <currency> <invoice>',
-            description: 'withdraws lightning funds',
-          },
-          {
-            command: 'withdraw <OTP token> <currency> <address> <amount in whole coins>',
-            description: 'withdraws a specific amount of onchain coins',
-          },
-          {
-            command: 'withdraw <OTP token> <currency> <address> all',
-            description: 'withdraws all onchain coins',
-          },
-        ],
-        executor: this.withdraw,
-        description: 'withdraws coins from Boltz',
-      }],
-      [Command.GetAddress, {
-        usage: [
-          {
-            command: 'getaddress <currency>',
-            description: 'gets an address for the currency `<currency>`',
-          },
-        ],
-        executor: this.getAddress,
-        description: 'gets an address for a currency',
-      }],
-      [Command.ToggleReverseSwaps, {
-        executor: this.toggleReverseSwaps,
-        description: 'enables or disables reverse swaps',
-      }],
+      [
+        Command.Backup,
+        {
+          executor: this.backup,
+          description: 'uploads a backup of the databases',
+        },
+      ],
+      [
+        Command.Withdraw,
+        {
+          usage: [
+            {
+              command: 'withdraw <OTP token> <currency> <invoice>',
+              description: 'withdraws lightning funds',
+            },
+            {
+              command:
+                'withdraw <OTP token> <currency> <address> <amount in whole coins>',
+              description: 'withdraws a specific amount of onchain coins',
+            },
+            {
+              command: 'withdraw <OTP token> <currency> <address> all',
+              description: 'withdraws all onchain coins',
+            },
+          ],
+          executor: this.withdraw,
+          description: 'withdraws coins from Boltz',
+        },
+      ],
+      [
+        Command.GetAddress,
+        {
+          usage: [
+            {
+              command: 'getaddress <currency>',
+              description: 'gets an address for the currency `<currency>`',
+            },
+          ],
+          executor: this.getAddress,
+          description: 'gets an address for a currency',
+        },
+      ],
+      [
+        Command.ToggleReverseSwaps,
+        {
+          executor: this.toggleReverseSwaps,
+          description: 'enables or disables reverse swaps',
+        },
+      ],
     ]);
 
     this.optManager = new OtpManager(this.logger, config);
@@ -159,7 +202,9 @@ class CommandHandler {
         const commandInfo = this.commands.get(command.toLowerCase());
 
         if (commandInfo) {
-          this.logger.debug(`Executing Discord command: ${command} ${args.join(', ')}`);
+          this.logger.debug(
+            `Executing Discord command: ${command} ${args.join(', ')}`,
+          );
           await commandInfo.executor(args);
         }
       }
@@ -224,9 +269,10 @@ class CommandHandler {
     });
 
     if (swap) {
-      const channelCreation = await ChannelCreationRepository.getChannelCreation({
-        swapId: id,
-      });
+      const channelCreation =
+        await ChannelCreationRepository.getChannelCreation({
+          swapId: id,
+        });
 
       await this.sendSwapInfo(swap, false, channelCreation);
       return;
@@ -246,27 +292,35 @@ class CommandHandler {
   };
 
   private getStats = async () => {
-    await this.discord.sendMessage(`${codeBlock}${
-      stringify(await Stats.generate())
-    }${codeBlock}`);
+    await this.discord.sendMessage(
+      `${codeBlock}${stringify(await Stats.generate())}${codeBlock}`,
+    );
   };
 
   private getBalance = async () => {
-    const balances = (await this.service.getBalance()).getBalancesMap();
+    const balances = (await this.service.getBalance()).toObject().balancesMap;
 
     let message = 'Balances:';
 
-    balances.forEach((balance: Balance, symbol: string) => {
-      message += `\n\n**${symbol}**\n` +
-        `Wallet: ${satoshisToCoins(balance.getWalletBalance()!.getTotalBalance())} ${symbol}`;
+    balances.forEach(([symbol, bals]) => {
+      message += `\n\n**${symbol}**\n`;
 
-      const lightningBalance = balance.getLightningBalance();
+      bals.walletsMap.forEach(([service, walletBals]) => {
+        message += `\n${service} Wallet: ${satoshisToCoins(
+          walletBals.confirmed + walletBals.unconfirmed,
+        )} ${symbol}`;
+      });
 
-      if (lightningBalance) {
-        message += '\n\nLND:\n' +
-          `  Local: ${satoshisToCoins(lightningBalance.getLocalBalance())} ${symbol}\n` +
-          `  Remote: ${satoshisToCoins(lightningBalance.getRemoteBalance())} ${symbol}`;
+      if (bals.lightningMap.length > 0) {
+        message += '\n';
       }
+
+      bals.lightningMap.forEach(([service, lightningBals]) => {
+        message +=
+          `\n${service}:\n` +
+          `  Local: ${satoshisToCoins(lightningBals.local)} ${symbol}\n` +
+          `  Remote: ${satoshisToCoins(lightningBals.remote)} ${symbol}`;
+      });
     });
 
     await this.discord.sendMessage(message);
@@ -286,7 +340,12 @@ class CommandHandler {
 
     for (const pending of pendingReverseSwaps) {
       const pair = splitPairId(pending.pair);
-      const chainCurrency = getChainCurrency(pair.base, pair.quote, pending.orderSide, true);
+      const chainCurrency = getChainCurrency(
+        pair.base,
+        pair.quote,
+        pending.orderSide,
+        true,
+      );
 
       let chainArray = pendingReverseSwapsByChain.get(chainCurrency);
 
@@ -307,7 +366,9 @@ class CommandHandler {
 
       for (const pendingReverseSwap of chainArray) {
         symbolTotal += pendingReverseSwap.onchainAmount;
-        message += `\n  - \`${pendingReverseSwap.id}\`: ${satoshisToCoins(pendingReverseSwap.onchainAmount)}`;
+        message += `\n  - \`${pendingReverseSwap.id}\`: ${satoshisToCoins(
+          pendingReverseSwap.onchainAmount,
+        )}`;
       }
 
       message += `\n\nTotal: ${satoshisToCoins(symbolTotal)}\n`;
@@ -345,7 +406,9 @@ class CommandHandler {
       const swaps = isReverse ? pendingReverseSwaps : pendingSwaps;
 
       if (swaps.length > 0) {
-        message += `\n${message.endsWith('\n') ? '' : '\n'}**Pending${isReverse ? ' reverse' : ''} Swaps:**\n\n`;
+        message += `\n${message.endsWith('\n') ? '' : '\n'}**Pending${
+          isReverse ? ' reverse' : ''
+        } Swaps:**\n\n`;
 
         for (const swap of swaps) {
           message += `- \`${swap.id}\`\n`;
@@ -360,9 +423,9 @@ class CommandHandler {
   };
 
   private getReferrals = async () => {
-    await this.discord.sendMessage(`${codeBlock}${
-      stringify(await ReferralStats.generate())
-    }${codeBlock}`);
+    await this.discord.sendMessage(
+      `${codeBlock}${stringify(await ReferralStats.generate())}${codeBlock}`,
+    );
   };
 
   private backup = async () => {
@@ -377,7 +440,9 @@ class CommandHandler {
 
   private getAddress = async (args: string[]) => {
     const sendError = (error: any) => {
-      return this.discord.sendMessage(`Could not get address: ${formatError(error)}`);
+      return this.discord.sendMessage(
+        `Could not get address: ${formatError(error)}`,
+      );
     };
 
     try {
@@ -415,12 +480,18 @@ class CommandHandler {
       try {
         const response = await this.service.payInvoice(symbol, args[2]);
 
-        await this.discord.sendMessage(`Paid lightning invoice\nPreimage: ${response.paymentPreimage}`);
+        await this.discord.sendMessage(
+          `Paid lightning invoice\nPreimage: ${getHexString(
+            response.preimage,
+          )}`,
+        );
       } catch (error) {
-        await this.discord.sendMessage(`Could not pay lightning invoice: ${formatError(error)}`);
+        await this.discord.sendMessage(
+          `Could not pay lightning invoice: ${formatError(error)}`,
+        );
       }
 
-    // Four arguments mean that the OTP token, the symbol, an address and the amount were provided
+      // Four arguments mean that the OTP token, the symbol, an address and the amount were provided
     } else if (args.length === 4) {
       try {
         const sendAll = args[3] === 'all';
@@ -434,9 +505,13 @@ class CommandHandler {
           address: args[2],
         });
 
-        await this.discord.sendMessage(`Sent transaction: ${response.transactionId}:${response.vout}`);
+        await this.discord.sendMessage(
+          `Sent transaction: ${response.transactionId}:${response.vout}`,
+        );
       } catch (error) {
-        await this.discord.sendMessage(`Could not send coins: ${formatError(error)}`);
+        await this.discord.sendMessage(
+          `Could not send coins: ${formatError(error)}`,
+        );
       }
     }
   };
@@ -444,7 +519,9 @@ class CommandHandler {
   private toggleReverseSwaps = async () => {
     this.service.allowReverseSwaps = !this.service.allowReverseSwaps;
 
-    const message = `${this.service.allowReverseSwaps ? 'Enabled' : 'Disabled'} Reverse Swaps`;
+    const message = `${
+      this.service.allowReverseSwaps ? 'Enabled' : 'Disabled'
+    } Reverse Swaps`;
 
     this.logger.info(message);
     await this.discord.sendMessage(message);
@@ -454,8 +531,13 @@ class CommandHandler {
    * Helper functions
    */
 
-  private sendSwapInfo = async (swap: Swap | ReverseSwap, isReverse: boolean, channelCreation?: ChannelCreation | null) => {
-    const hasChannelCreation = channelCreation !== null && channelCreation !== undefined;
+  private sendSwapInfo = async (
+    swap: Swap | ReverseSwap,
+    isReverse: boolean,
+    channelCreation?: ChannelCreation | null,
+  ) => {
+    const hasChannelCreation =
+      channelCreation !== null && channelCreation !== undefined;
 
     let name: string;
 
@@ -469,8 +551,12 @@ class CommandHandler {
       }
     }
 
-    await this.discord.sendMessage(`${name} \`${swap.id}\`:\n` +
-        `${codeBlock}${stringify(swap)}${hasChannelCreation ? '\n' + stringify(channelCreation) : ''}${codeBlock}`);
+    await this.discord.sendMessage(
+      `${name} \`${swap.id}\`:\n` +
+        `${codeBlock}${stringify(swap)}${
+          hasChannelCreation ? '\n' + stringify(channelCreation) : ''
+        }${codeBlock}`,
+    );
   };
 
   private sendCouldNotFindSwap = async (id: string) => {

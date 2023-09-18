@@ -1,23 +1,29 @@
 import { Op } from 'sequelize';
 import { randomBytes } from 'crypto';
 import { crypto } from 'bitcoinjs-lib';
-import { OutputType, reverseSwapScript, swapScript } from 'boltz-core';
+import { reverseSwapScript, swapScript } from 'boltz-core';
 import Errors from './Errors';
 import Logger from '../Logger';
 import Swap from '../db/models/Swap';
 import SwapNursery from './SwapNursery';
-import LndClient from '../lightning/LndClient';
+import SwapOutputType from './SwapOutputType';
 import RateProvider from '../rates/RateProvider';
-import ReverseSwap from '../db/models/ReverseSwap';
+import RoutingHints from './routing/RoutingHints';
+import WalletLiquid from '../wallet/WalletLiquid';
 import { ReverseSwapOutputType } from '../consts/Consts';
-import RoutingHintsProvider from './RoutingHintsProvider';
 import SwapRepository from '../db/repositories/SwapRepository';
 import InvoiceExpiryHelper from '../service/InvoiceExpiryHelper';
+import ReverseSwap, { NodeType } from '../db/models/ReverseSwap';
 import WalletManager, { Currency } from '../wallet/WalletManager';
 import TimeoutDeltaProvider from '../service/TimeoutDeltaProvider';
 import ReverseSwapRepository from '../db/repositories/ReverseSwapRepository';
 import ChannelCreationRepository from '../db/repositories/ChannelCreationRepository';
-import { ChannelCreationType, CurrencyType, OrderSide, SwapUpdateEvent } from '../consts/Enums';
+import {
+  ChannelCreationType,
+  CurrencyType,
+  OrderSide,
+  SwapUpdateEvent,
+} from '../consts/Enums';
 import {
   decodeInvoice,
   formatError,
@@ -35,11 +41,12 @@ import {
   reverseBuffer,
   splitPairId,
 } from '../Utils';
+import NodeSwitch from './NodeSwitch';
 
 type ChannelCreationInfo = {
-  auto: boolean,
-  private: boolean,
-  inboundLiquidity: number,
+  auto: boolean;
+  private: boolean;
+  inboundLiquidity: number;
 };
 
 type SetSwapInvoiceResponse = {
@@ -51,26 +58,30 @@ class SwapManager {
 
   public nursery: SwapNursery;
 
-  public routingHints!: RoutingHintsProvider;
+  public routingHints!: RoutingHints;
 
   constructor(
     private logger: Logger,
     private walletManager: WalletManager,
+    private nodeSwitch: NodeSwitch,
     rateProvider: RateProvider,
+    timeoutDeltaProvider: TimeoutDeltaProvider,
     private invoiceExpiryHelper: InvoiceExpiryHelper,
-    private swapOutputType: OutputType,
+    private swapOutputType: SwapOutputType,
     retryInterval: number,
   ) {
     this.nursery = new SwapNursery(
       this.logger,
+      this.nodeSwitch,
       rateProvider,
+      timeoutDeltaProvider,
       this.walletManager,
       this.swapOutputType,
       retryInterval,
     );
   }
 
-  public init = async (currencies: Currency[]): Promise<void>=> {
+  public init = async (currencies: Currency[]): Promise<void> => {
     currencies.forEach((currency) => {
       this.currencies.set(currency.symbol, currency);
     });
@@ -103,20 +114,11 @@ class SwapManager {
     this.recreateFilters(pendingSwaps, false);
     this.recreateFilters(pendingReverseSwaps, true);
 
-    this.logger.info('Recreated input and output filters and invoice subscriptions');
-
-    const lndClients: LndClient[] = [];
-
-    for (const currency of currencies) {
-      if (currency.lndClient) {
-        lndClients.push(currency.lndClient);
-      }
-    }
-
-    this.routingHints = new RoutingHintsProvider(
-      this.logger,
-      lndClients,
+    this.logger.info(
+      'Recreated input and output filters and invoice subscriptions',
     );
+
+    this.routingHints = new RoutingHints(this.logger, currencies);
     await this.routingHints.start();
   };
 
@@ -124,59 +126,76 @@ class SwapManager {
    * Creates a new Submarine Swap from the chain to Lightning with a preimage hash
    */
   public createSwap = async (args: {
-    baseCurrency: string,
-    quoteCurrency: string,
-    orderSide: OrderSide,
-    preimageHash: Buffer,
-    timeoutBlockDelta: number,
+    baseCurrency: string;
+    quoteCurrency: string;
+    orderSide: OrderSide;
+    preimageHash: Buffer;
+    timeoutBlockDelta: number;
 
-    channel?: ChannelCreationInfo,
+    channel?: ChannelCreationInfo;
 
     // Referral ID for the swap
-    referralId?: string,
+    referralId?: string;
 
     // Only required for UTXO based chains
-    refundPublicKey?: Buffer,
+    refundPublicKey?: Buffer;
   }): Promise<{
-    id: string,
-    timeoutBlockHeight: number,
+    id: string;
+    timeoutBlockHeight: number;
 
     // This is either the generated address for Bitcoin like chains, or the address of the contract
     // to which the user should send the lockup transaction for Ether and ERC20 tokens
-    address: string,
+    address: string;
 
     // Only set for Bitcoin like, UTXO based, chains
-    redeemScript?: string,
+    redeemScript?: string;
 
     // Specified when either Ether or ERC20 tokens or swapped to Lightning
     // So that the user can specify the claim address (Boltz) in the lockup transaction to the contract
-    claimAddress?: string,
-  }> => {
-    const { sendingCurrency, receivingCurrency } = this.getCurrencies(args.baseCurrency, args.quoteCurrency, args.orderSide);
+    claimAddress?: string;
 
-    if (!sendingCurrency.lndClient) {
-      throw Errors.NO_LND_CLIENT(sendingCurrency.symbol);
+    // For blinded Liquid swaps
+    blindingKey?: string;
+  }> => {
+    const { sendingCurrency, receivingCurrency } = this.getCurrencies(
+      args.baseCurrency,
+      args.quoteCurrency,
+      args.orderSide,
+    );
+
+    if (!NodeSwitch.hasClient(sendingCurrency)) {
+      throw Errors.NO_LIGHTNING_SUPPORT(sendingCurrency.symbol);
     }
 
     const id = generateId();
 
-    this.logger.verbose(`Creating new Swap from ${receivingCurrency.symbol} to ${sendingCurrency.symbol}: ${id}`);
+    this.logger.verbose(
+      `Creating new Swap from ${receivingCurrency.symbol} to ${sendingCurrency.symbol}: ${id}`,
+    );
 
     if (args.referralId) {
       this.logger.silly(`Using referral ID ${args.referralId} for Swap ${id}`);
     }
 
-    const pair = getPairId({ base: args.baseCurrency, quote: args.quoteCurrency });
+    const pair = getPairId({
+      base: args.baseCurrency,
+      quote: args.quoteCurrency,
+    });
 
     let address: string;
     let timeoutBlockHeight: number;
 
+    let blindingKey: Buffer | undefined;
     let redeemScript: Buffer | undefined;
 
     let claimAddress: string | undefined;
 
-    if (receivingCurrency.type === CurrencyType.BitcoinLike) {
-      const { blocks } = await receivingCurrency.chainClient!.getBlockchainInfo();
+    if (
+      receivingCurrency.type === CurrencyType.BitcoinLike ||
+      receivingCurrency.type === CurrencyType.Liquid
+    ) {
+      const { blocks } =
+        await receivingCurrency.chainClient!.getBlockchainInfo();
       timeoutBlockHeight = blocks + args.timeoutBlockDelta;
 
       const { keys, index } = receivingCurrency.wallet.getNewKeys();
@@ -188,12 +207,19 @@ class SwapManager {
         timeoutBlockHeight,
       );
 
-      const encodeFunction = getScriptHashFunction(this.swapOutputType);
+      const encodeFunction = getScriptHashFunction(
+        this.swapOutputType.get(receivingCurrency.type),
+      );
       const outputScript = encodeFunction(redeemScript);
 
       address = receivingCurrency.wallet.encodeAddress(outputScript);
-
       receivingCurrency.chainClient!.addOutputFilter(outputScript);
+
+      if (receivingCurrency.type === CurrencyType.Liquid) {
+        blindingKey = (
+          receivingCurrency.wallet as WalletLiquid
+        ).deriveBlindingKeyFromScript(outputScript).privateKey;
+      }
 
       await SwapRepository.addSwap({
         id,
@@ -235,7 +261,9 @@ class SwapManager {
       await ChannelCreationRepository.addChannelCreation({
         swapId: id,
         private: args.channel.private,
-        type: args.channel.auto ? ChannelCreationType.Auto : ChannelCreationType.Create,
+        type: args.channel.auto
+          ? ChannelCreationType.Auto
+          : ChannelCreationType.Create,
         inboundLiquidity: args.channel.inboundLiquidity,
       });
     }
@@ -247,11 +275,12 @@ class SwapManager {
       timeoutBlockHeight,
 
       redeemScript: redeemScript ? getHexString(redeemScript) : undefined,
+      blindingKey: blindingKey ? getHexString(blindingKey) : undefined,
     };
   };
 
   /**
-   * Sets the invoice of a Submarine Swap
+   * Sets the invoice for a Submarine Swap
    *
    * @param swap database object of the swap
    * @param invoice invoice of the Swap
@@ -259,6 +288,7 @@ class SwapManager {
    * @param expectedAmount amount that is expected onchain
    * @param percentageFee fee Boltz charges for the Swap
    * @param acceptZeroConf whether 0-conf transactions should be accepted
+   * @param canBeRouted whether the invoice for the swap
    * @param emitSwapInvoiceSet method to emit an event after the invoice has been set
    */
   public setSwapInvoice = async (
@@ -268,12 +298,17 @@ class SwapManager {
     expectedAmount: number,
     percentageFee: number,
     acceptZeroConf: boolean,
+    canBeRouted: boolean,
     emitSwapInvoiceSet: (id: string) => void,
   ): Promise<SetSwapInvoiceResponse> => {
     const response: SetSwapInvoiceResponse = {};
 
     const { base, quote } = splitPairId(swap.pair);
-    const { sendingCurrency, receivingCurrency } = this.getCurrencies(base, quote, swap.orderSide);
+    const { receivingCurrency } = this.getCurrencies(
+      base,
+      quote,
+      swap.orderSide,
+    );
 
     const decodedInvoice = decodeInvoice(invoice);
 
@@ -281,7 +316,10 @@ class SwapManager {
       throw Errors.INVOICE_INVALID_PREIMAGE_HASH(swap.preimageHash);
     }
 
-    const invoiceExpiry = InvoiceExpiryHelper.getInvoiceExpiry(decodedInvoice.timestamp, decodedInvoice.timeExpireDate);
+    const invoiceExpiry = InvoiceExpiryHelper.getInvoiceExpiry(
+      decodedInvoice.timestamp,
+      decodedInvoice.timeExpireDate,
+    );
 
     if (getUnixTime() >= invoiceExpiry) {
       throw Errors.INVOICE_EXPIRED_ALREADY();
@@ -292,8 +330,13 @@ class SwapManager {
     });
 
     if (channelCreation) {
-      const getChainInfo = async (currency: Currency): Promise<{ blocks: number, blockTime: number }> => {
-        if (currency.type === CurrencyType.BitcoinLike) {
+      const getChainInfo = async (
+        currency: Currency,
+      ): Promise<{ blocks: number; blockTime: number }> => {
+        if (
+          currency.type === CurrencyType.BitcoinLike ||
+          currency.type === CurrencyType.Liquid
+        ) {
           const { blocks } = await currency.chainClient!.getBlockchainInfo();
 
           return {
@@ -301,7 +344,7 @@ class SwapManager {
             blockTime: TimeoutDeltaProvider.blockTimes.get(currency.symbol)!,
           };
 
-        // All currencies that are not Bitcoin-like are either Ether or an ERC20 token on the Ethereum chain
+          // All currencies that are not Bitcoin-like are either Ether or an ERC20 token on the Ethereum chain
         } else {
           return {
             blocks: await currency.provider!.getBlockNumber(),
@@ -313,20 +356,26 @@ class SwapManager {
       const { blocks, blockTime } = await getChainInfo(receivingCurrency);
       const blocksUntilExpiry = swap.timeoutBlockHeight - blocks;
 
-      const timeoutTimestamp = getUnixTime() + (blocksUntilExpiry * blockTime * 60);
-
-      const invoiceError = Errors.INVOICE_EXPIRES_TOO_EARLY(invoiceExpiry, timeoutTimestamp);
+      const timeoutTimestamp =
+        getUnixTime() + blocksUntilExpiry * blockTime * 60;
 
       if (timeoutTimestamp > invoiceExpiry) {
+        const invoiceError = Errors.INVOICE_EXPIRES_TOO_EARLY(
+          invoiceExpiry,
+          timeoutTimestamp,
+        );
+
         // In the auto Channel Creation mode, which is used by the frontend, the invoice check can fail but the Swap should
         // still be attempted without Channel Creation
         if (channelCreation.type === ChannelCreationType.Auto) {
-          this.logger.info(`Disabling Channel Creation for Swap ${swap.id}: ${invoiceError.message}`);
+          this.logger.info(
+            `Disabling Channel Creation for Swap ${swap.id}: ${invoiceError.message}`,
+          );
           response.channelCreationError = invoiceError.message;
 
           await channelCreation.destroy();
 
-          if (!await this.checkRoutability(sendingCurrency.lndClient!, invoice)) {
+          if (!canBeRouted) {
             throw Errors.NO_ROUTE_FOUND();
           }
 
@@ -336,11 +385,15 @@ class SwapManager {
         }
       }
 
-      await ChannelCreationRepository.setNodePublicKey(channelCreation, decodedInvoice.payeeNodeKey!);
-
-    // If there are route hints the routability check could fail although LND could pay the invoice
-    } else if (!decodedInvoice.routingInfo || (decodedInvoice.routingInfo && decodedInvoice.routingInfo.length === 0)) {
-      if (!await this.checkRoutability(sendingCurrency.lndClient!, invoice)) {
+      await ChannelCreationRepository.setNodePublicKey(
+        channelCreation,
+        decodedInvoice.payeeNodeKey!,
+      );
+    } else if (
+      !decodedInvoice.routingInfo ||
+      (decodedInvoice.routingInfo && decodedInvoice.routingInfo.length === 0)
+    ) {
+      if (!canBeRouted) {
         throw Errors.NO_ROUTE_FOUND();
       }
     }
@@ -363,14 +416,16 @@ class SwapManager {
 
     // If the onchain coins were sent already and 0-conf can be accepted or
     // the lockup transaction is confirmed the swap should be settled directly
-    if (swap.lockupTransactionId && previousStatus !== SwapUpdateEvent.TransactionZeroConfRejected) {
+    if (
+      swap.lockupTransactionId &&
+      previousStatus !== SwapUpdateEvent.TransactionZeroConfRejected
+    ) {
       try {
-        await this.nursery.attemptSettleSwap(
-          receivingCurrency,
-          updatedSwap,
-        );
+        await this.nursery.attemptSettleSwap(receivingCurrency, updatedSwap);
       } catch (error) {
-        this.logger.warn(`Could not settle Swap ${swap.id}: ${formatError(error)}`);
+        this.logger.warn(
+          `Could not settle Swap ${swap.id}: ${formatError(error)}`,
+        );
       }
     }
 
@@ -381,67 +436,89 @@ class SwapManager {
    * Creates a new reverse Swap from Lightning to the chain
    */
   public createReverseSwap = async (args: {
-    baseCurrency: string,
-    quoteCurrency: string,
-    orderSide: OrderSide,
-    preimageHash: Buffer,
-    holdInvoiceAmount: number,
-    onchainAmount: number,
-    onchainTimeoutBlockDelta: number,
-    lightningTimeoutBlockDelta: number,
-    percentageFee: number,
+    baseCurrency: string;
+    quoteCurrency: string;
+    orderSide: OrderSide;
+    preimageHash: Buffer;
+    holdInvoiceAmount: number;
+    onchainAmount: number;
+    onchainTimeoutBlockDelta: number;
+    lightningTimeoutBlockDelta: number;
+    percentageFee: number;
 
-    prepayMinerFeeInvoiceAmount?: number,
-    prepayMinerFeeOnchainAmount?: number,
+    prepayMinerFeeInvoiceAmount?: number;
+    prepayMinerFeeOnchainAmount?: number;
 
     // Public key of the node for which routing hints should be included in the invoice(s)
-    routingNode?: string,
+    routingNode?: string;
 
     // Referral ID for the reverse swap
-    referralId?: string,
+    referralId?: string;
 
     // Only required for Swaps to UTXO based chains
-    claimPublicKey?: Buffer,
+    claimPublicKey?: Buffer;
 
     // Only required for Swaps to Ether and ERC20 tokens
     // Address of the user to which the coins will be sent after a successful claim transaction
-    claimAddress?: string,
+    claimAddress?: string;
   }): Promise<{
-    id: string,
-    timeoutBlockHeight: number,
+    id: string;
+    timeoutBlockHeight: number;
 
-    invoice: string,
-    minerFeeInvoice: string | undefined,
+    invoice: string;
+    minerFeeInvoice: string | undefined;
 
     // Only set for Bitcoin like, UTXO based, chains
-    redeemScript: string | undefined,
+    redeemScript: string | undefined;
 
     // Only set for Ethereum like chains
-    refundAddress: string | undefined,
+    refundAddress: string | undefined;
 
     // This is either the generated address for Bitcoin like chains, or the address of the contract
     // to which Boltz will send the lockup transaction for Ether and ERC20 tokens
-    lockupAddress: string,
-  }> => {
-    const { sendingCurrency, receivingCurrency } = this.getCurrencies(args.baseCurrency, args.quoteCurrency, args.orderSide);
+    lockupAddress: string;
 
-    if (!receivingCurrency.lndClient) {
-      throw Errors.NO_LND_CLIENT(receivingCurrency.symbol);
+    // For blinded Liquid reverse swaps
+    blindingKey?: string;
+  }> => {
+    const { sendingCurrency, receivingCurrency } = this.getCurrencies(
+      args.baseCurrency,
+      args.quoteCurrency,
+      args.orderSide,
+    );
+
+    if (!NodeSwitch.hasClient(receivingCurrency)) {
+      throw Errors.NO_LIGHTNING_SUPPORT(receivingCurrency.symbol);
     }
 
     const id = generateId();
 
-    this.logger.verbose(`Creating new Reverse Swap from ${receivingCurrency.symbol} to ${sendingCurrency.symbol}: ${id}`);
+    this.logger.verbose(
+      `Creating new Reverse Swap from ${receivingCurrency.symbol} to ${sendingCurrency.symbol}: ${id}`,
+    );
+
+    const { nodeType, lightningClient } = this.nodeSwitch.getNodeForReverseSwap(
+      id,
+      receivingCurrency,
+      args.holdInvoiceAmount,
+      args.referralId,
+    );
 
     if (args.referralId) {
-      this.logger.silly(`Using referral ID ${args.referralId} for Reverse Swap ${id}`);
+      this.logger.silly(
+        `Using referral ID ${args.referralId} for Reverse Swap ${id}`,
+      );
     }
 
-    const routingHints = args.routingNode !== undefined ?
-      this.routingHints.getRoutingHints(receivingCurrency.symbol, args.routingNode) :
-      undefined;
+    const routingHints =
+      args.routingNode !== undefined
+        ? await this.routingHints.getRoutingHints(
+            receivingCurrency.symbol,
+            args.routingNode,
+          )
+        : undefined;
 
-    const { paymentRequest } = await receivingCurrency.lndClient.addHoldInvoice(
+    const paymentRequest = await lightningClient.addHoldInvoice(
       args.holdInvoiceAmount,
       args.preimageHash,
       args.lightningTimeoutBlockDelta,
@@ -450,7 +527,7 @@ class SwapManager {
       routingHints,
     );
 
-    receivingCurrency.lndClient.subscribeSingleInvoice(args.preimageHash);
+    lightningClient.subscribeSingleInvoice(args.preimageHash);
 
     let minerFeeInvoice: string | undefined = undefined;
     let minerFeeInvoicePreimage: string | undefined = undefined;
@@ -461,7 +538,7 @@ class SwapManager {
 
       const minerFeeInvoicePreimageHash = crypto.sha256(preimage);
 
-      const prepayInvoice = await receivingCurrency.lndClient.addHoldInvoice(
+      minerFeeInvoice = await lightningClient.addHoldInvoice(
         args.prepayMinerFeeInvoiceAmount,
         minerFeeInvoicePreimageHash,
         undefined,
@@ -469,25 +546,33 @@ class SwapManager {
         getPrepayMinerFeeInvoiceMemo(sendingCurrency.symbol),
         routingHints,
       );
-      minerFeeInvoice = prepayInvoice.paymentRequest;
 
-      receivingCurrency.lndClient.subscribeSingleInvoice(minerFeeInvoicePreimageHash);
+      lightningClient.subscribeSingleInvoice(minerFeeInvoicePreimageHash);
 
       if (args.prepayMinerFeeOnchainAmount) {
-        this.logger.debug(`Sending ${args.prepayMinerFeeOnchainAmount} Ether as prepay miner fee for Reverse Swap: ${id}`);
+        this.logger.debug(
+          `Sending ${args.prepayMinerFeeOnchainAmount} Ether as prepay miner fee for Reverse Swap: ${id}`,
+        );
       }
     }
 
-    const pair = getPairId({ base: args.baseCurrency, quote: args.quoteCurrency });
+    const pair = getPairId({
+      base: args.baseCurrency,
+      quote: args.quoteCurrency,
+    });
 
     let lockupAddress: string;
     let timeoutBlockHeight: number;
 
+    let blindingKey: Buffer | undefined;
     let redeemScript: Buffer | undefined;
 
     let refundAddress: string | undefined;
 
-    if (sendingCurrency.type === CurrencyType.BitcoinLike) {
+    if (
+      sendingCurrency.type === CurrencyType.BitcoinLike ||
+      sendingCurrency.type === CurrencyType.Liquid
+    ) {
       const { keys, index } = sendingCurrency.wallet.getNewKeys();
       const { blocks } = await sendingCurrency.chainClient!.getBlockchainInfo();
       timeoutBlockHeight = blocks + args.onchainTimeoutBlockDelta;
@@ -499,8 +584,16 @@ class SwapManager {
         timeoutBlockHeight,
       );
 
-      const outputScript = getScriptHashFunction(ReverseSwapOutputType)(redeemScript);
+      const outputScript = getScriptHashFunction(ReverseSwapOutputType)(
+        redeemScript,
+      );
       lockupAddress = sendingCurrency.wallet.encodeAddress(outputScript);
+
+      if (sendingCurrency.type === CurrencyType.Liquid) {
+        blindingKey = (
+          sendingCurrency.wallet as WalletLiquid
+        ).deriveBlindingKeyFromScript(outputScript).privateKey;
+      }
 
       await ReverseSwapRepository.addReverseSwap({
         id,
@@ -509,6 +602,7 @@ class SwapManager {
         minerFeeInvoice,
         timeoutBlockHeight,
 
+        node: nodeType,
         keyIndex: index,
         fee: args.percentageFee,
         invoice: paymentRequest,
@@ -522,13 +616,14 @@ class SwapManager {
         minerFeeInvoicePreimage: minerFeeInvoicePreimage,
         minerFeeOnchainAmount: args.prepayMinerFeeOnchainAmount,
       });
-
     } else {
       const blockNumber = await sendingCurrency.provider!.getBlockNumber();
       timeoutBlockHeight = blockNumber + args.onchainTimeoutBlockDelta;
 
       lockupAddress = await this.getLockupContractAddress(sendingCurrency.type);
-      refundAddress = await this.walletManager.wallets.get(sendingCurrency.symbol)!.getAddress();
+      refundAddress = await this.walletManager.wallets
+        .get(sendingCurrency.symbol)!
+        .getAddress();
 
       await ReverseSwapRepository.addReverseSwap({
         id,
@@ -537,6 +632,7 @@ class SwapManager {
         minerFeeInvoice,
         timeoutBlockHeight,
 
+        node: nodeType,
         fee: args.percentageFee,
         invoice: paymentRequest,
         orderSide: args.orderSide,
@@ -558,39 +654,74 @@ class SwapManager {
       minerFeeInvoice,
       timeoutBlockHeight,
       invoice: paymentRequest,
+      blindingKey: blindingKey ? getHexString(blindingKey) : undefined,
       redeemScript: redeemScript ? getHexString(redeemScript) : undefined,
     };
   };
 
   // TODO: check current status of invoices or do the streams handle that already?
-  private recreateFilters = (swaps: Swap[] | ReverseSwap[], isReverse: boolean) => {
+  private recreateFilters = (
+    swaps: Swap[] | ReverseSwap[],
+    isReverse: boolean,
+  ) => {
     swaps.forEach((swap: Swap | ReverseSwap) => {
       const { base, quote } = splitPairId(swap.pair);
-      const chainCurrency = getChainCurrency(base, quote, swap.orderSide, isReverse);
-      const lightningCurrency = getLightningCurrency(base, quote, swap.orderSide, isReverse);
+      const chainCurrency = getChainCurrency(
+        base,
+        quote,
+        swap.orderSide,
+        isReverse,
+      );
+      const lightningCurrency = getLightningCurrency(
+        base,
+        quote,
+        swap.orderSide,
+        isReverse,
+      );
 
-      if ((swap.status === SwapUpdateEvent.SwapCreated || swap.status === SwapUpdateEvent.MinerFeePaid) && isReverse) {
+      if (
+        (swap.status === SwapUpdateEvent.SwapCreated ||
+          swap.status === SwapUpdateEvent.MinerFeePaid) &&
+        isReverse
+      ) {
         const reverseSwap = swap as ReverseSwap;
 
         const { lndClient } = this.currencies.get(lightningCurrency)!;
 
-        if (reverseSwap.minerFeeInvoice && swap.status !== SwapUpdateEvent.MinerFeePaid) {
-          lndClient!.subscribeSingleInvoice(getHexBuffer(decodeInvoice(reverseSwap.minerFeeInvoice).paymentHash!));
+        if (
+          reverseSwap.node === NodeType.LND &&
+          reverseSwap.minerFeeInvoice &&
+          swap.status !== SwapUpdateEvent.MinerFeePaid
+        ) {
+          lndClient?.subscribeSingleInvoice(
+            getHexBuffer(
+              decodeInvoice(reverseSwap.minerFeeInvoice).paymentHash!,
+            ),
+          );
         }
 
-        lndClient!.subscribeSingleInvoice(getHexBuffer(decodeInvoice(reverseSwap.invoice).paymentHash!));
-
-      } else if ((swap.status === SwapUpdateEvent.TransactionMempool || swap.status === SwapUpdateEvent.TransactionConfirmed) && isReverse) {
+        lndClient?.subscribeSingleInvoice(
+          getHexBuffer(decodeInvoice(reverseSwap.invoice).paymentHash!),
+        );
+      } else if (
+        (swap.status === SwapUpdateEvent.TransactionMempool ||
+          swap.status === SwapUpdateEvent.TransactionConfirmed) &&
+        isReverse
+      ) {
         const { chainClient } = this.currencies.get(chainCurrency)!;
 
         if (chainClient) {
-          const transactionId = reverseBuffer(getHexBuffer((swap as ReverseSwap).transactionId!));
+          const transactionId = reverseBuffer(
+            getHexBuffer((swap as ReverseSwap).transactionId!),
+          );
           chainClient.addInputFilter(transactionId);
 
           // To detect when the transaction confirms
           if (swap.status === SwapUpdateEvent.TransactionMempool) {
             const wallet = this.walletManager.wallets.get(chainCurrency)!;
-            chainClient.addOutputFilter(wallet.decodeAddress(swap.lockupAddress));
+            chainClient.addOutputFilter(
+              wallet.decodeAddress(swap.lockupAddress),
+            );
           }
         }
       } else {
@@ -606,42 +737,16 @@ class SwapManager {
     });
   };
 
-  /**
-   * @returns whether the payment can be routed
-   */
-  private checkRoutability = async (lnd: LndClient, invoice: string) => {
-    try {
-      // TODO: do MPP probing once it is available
-      const decodedInvoice = await lnd.decodePayReq(invoice);
-
-      // Check whether the receiving side supports MPP and if so,
-      // query a route for the number of sats of the invoice divided
-      // by the max payment parts we tell to LND to use
-      let supportsMpp = false;
-
-      for (const [, feature] of decodedInvoice.featuresMap) {
-        if (feature.name === 'multi-path-payments' && feature.isKnown) {
-          supportsMpp = true;
-          break;
-        }
-      }
-
-      const amountToQuery = supportsMpp ?
-        Math.round(decodedInvoice.numSatoshis / LndClient.paymentMaxParts) :
-        decodedInvoice.numSatoshis;
-
-      const routes = await lnd.queryRoutes(decodedInvoice.destination, amountToQuery);
-
-      // TODO: "routes.routesList.length >= LndClient.paymentParts" when receiver supports MPP?
-      return routes.routesList.length > 0;
-    } catch (error) {
-      this.logger.debug(`Could not query routes: ${error}`);
-      return false;
-    }
-  };
-
-  private getCurrencies = (baseCurrency: string, quoteCurrency: string, orderSide: OrderSide) => {
-    const { sending, receiving } = getSendingReceivingCurrency(baseCurrency, quoteCurrency, orderSide);
+  private getCurrencies = (
+    baseCurrency: string,
+    quoteCurrency: string,
+    orderSide: OrderSide,
+  ) => {
+    const { sending, receiving } = getSendingReceivingCurrency(
+      baseCurrency,
+      quoteCurrency,
+      orderSide,
+    );
 
     return {
       sendingCurrency: {
@@ -667,9 +772,9 @@ class SwapManager {
 
   private getLockupContractAddress = (type: CurrencyType): Promise<string> => {
     const ethereumManager = this.walletManager.ethereumManager!;
-    return type === CurrencyType.Ether ?
-      ethereumManager.etherSwap.getAddress() :
-      ethereumManager.erc20Swap.getAddress();
+    return type === CurrencyType.Ether
+      ? ethereumManager.etherSwap.getAddress()
+      : ethereumManager.erc20Swap.getAddress();
   };
 }
 

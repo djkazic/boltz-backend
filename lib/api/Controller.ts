@@ -1,3 +1,4 @@
+import path from 'path';
 import { Request, Response } from 'express';
 import Errors from './Errors';
 import Logger from '../Logger';
@@ -11,13 +12,21 @@ import { SwapType, SwapUpdateEvent } from '../consts/Enums';
 import SwapRepository from '../db/repositories/SwapRepository';
 import ReverseSwapRepository from '../db/repositories/ReverseSwapRepository';
 import ChannelCreationRepository from '../db/repositories/ChannelCreationRepository';
-import { getChainCurrency, getHexBuffer, getVersion, mapToObject, splitPairId, stringify } from '../Utils';
+import {
+  getChainCurrency,
+  getHexBuffer,
+  getVersion,
+  mapToObject,
+  saneStringify,
+  splitPairId,
+  stringify,
+} from '../Utils';
 
 type ApiArgument = {
-  name: string,
-  type: string,
-  hex?: boolean,
-  optional?: boolean,
+  name: string;
+  type: string;
+  hex?: boolean;
+  optional?: boolean;
 };
 
 class Controller {
@@ -28,15 +37,18 @@ class Controller {
   // A map between the ids and statuses of the swaps
   private pendingSwapInfos = new Map<string, SwapUpdate>();
 
-  constructor(private logger: Logger, private service: Service) {
+  constructor(
+    private logger: Logger,
+    private service: Service,
+  ) {
     this.service.eventHandler.on('swap.update', (id, message) => {
-      this.logger.debug(`Swap ${id} update: ${stringify(message)}`);
+      this.logger.debug(`Swap ${id} update: ${saneStringify(message)}`);
       this.pendingSwapInfos.set(id, message);
 
       const response = this.pendingSwapStreams.get(id);
 
       if (response) {
-        response.write(`data: ${JSON.stringify(message)}\n\n`);
+        this.writeToSse(response, message);
       }
     });
   }
@@ -51,13 +63,14 @@ class Controller {
     ]);
 
     for (const swap of swaps) {
-      const status = swap.status as SwapUpdateEvent;
+      const status = swap.status;
 
       switch (status) {
         case SwapUpdateEvent.ChannelCreated: {
-          const channelCreation = await ChannelCreationRepository.getChannelCreation({
-            swapId: swap.id,
-          });
+          const channelCreation =
+            await ChannelCreationRepository.getChannelCreation({
+              swapId: swap.id,
+            });
 
           this.pendingSwapInfos.set(swap.id, {
             status,
@@ -71,42 +84,60 @@ class Controller {
         }
 
         case SwapUpdateEvent.TransactionZeroConfRejected:
-          this.pendingSwapInfos.set(swap.id, { status: SwapUpdateEvent.TransactionMempool, zeroConfRejected: true });
+          this.pendingSwapInfos.set(swap.id, {
+            status: SwapUpdateEvent.TransactionMempool,
+            zeroConfRejected: true,
+          });
           break;
 
         default:
           this.pendingSwapInfos.set(swap.id, {
             status: swap.status as SwapUpdateEvent,
-            failureReason: swap.failureReason,
+            failureReason:
+              swap.failureReason !== null ? swap.failureReason : undefined,
           });
           break;
       }
     }
 
     for (const reverseSwap of reverseSwaps) {
-      const status = reverseSwap.status as SwapUpdateEvent;
+      const status = reverseSwap.status;
 
       switch (status) {
         case SwapUpdateEvent.TransactionMempool:
         case SwapUpdateEvent.TransactionConfirmed: {
           const { base, quote } = splitPairId(reverseSwap.pair);
-          const chainCurrency = getChainCurrency(base, quote, reverseSwap.orderSide, true);
+          const chainCurrency = getChainCurrency(
+            base,
+            quote,
+            reverseSwap.orderSide,
+            true,
+          );
 
           try {
-            const transactionHex = await this.service.getTransaction(chainCurrency, reverseSwap.transactionId!);
+            const transactionHex = await this.service.getTransaction(
+              chainCurrency,
+              reverseSwap.transactionId!,
+            );
 
             this.pendingSwapInfos.set(reverseSwap.id, {
               status,
               transaction: {
                 hex: transactionHex,
                 id: reverseSwap.transactionId!,
-                eta: status === SwapUpdateEvent.TransactionMempool ? SwapNursery.reverseSwapMempoolEta : undefined,
+                eta:
+                  status === SwapUpdateEvent.TransactionMempool
+                    ? SwapNursery.reverseSwapMempoolEta
+                    : undefined,
               },
             });
           } catch (error) {
             // If the transaction can't be queried with the service it's either a transaction on the Ethereum network,
             // or something is terribly wrong
-            if ((error as any).message !== ServiceErrors.NOT_SUPPORTED_BY_SYMBOL(chainCurrency).message) {
+            if (
+              (error as any).message !==
+              ServiceErrors.NOT_SUPPORTED_BY_SYMBOL(chainCurrency).message
+            ) {
               throw error;
             }
 
@@ -122,10 +153,17 @@ class Controller {
         }
 
         default:
-          this.pendingSwapInfos.set(reverseSwap.id, { status });
+          this.pendingSwapInfos.set(reverseSwap.id, {
+            status: status as SwapUpdateEvent,
+          });
           break;
       }
     }
+  };
+
+  // Static files
+  public landingPage = (_: Request, res: Response): void => {
+    res.sendFile(path.join(__dirname, 'static', 'api.html'));
   };
 
   // GET requests
@@ -153,6 +191,14 @@ class Controller {
     });
   };
 
+  public getNodeStats = (_: Request, res: Response): void => {
+    const stats = this.service.getNodeStats();
+
+    this.successResponse(res, {
+      nodes: mapToObject(stats),
+    });
+  };
+
   public getTimeouts = async (_: Request, res: Response): Promise<void> => {
     const timeouts = this.service.getTimeouts();
 
@@ -177,21 +223,27 @@ class Controller {
     }
   };
 
-  public getFeeEstimation = async (_: Request, res: Response): Promise<void> => {
+  public getFeeEstimation = async (
+    _: Request,
+    res: Response,
+  ): Promise<void> => {
     const feeEstimation = await this.service.getFeeEstimation();
 
     this.successResponse(res, mapToObject(feeEstimation));
   };
 
   // POST requests
-  public routingHints = (req: Request, res: Response): void => {
+  public routingHints = async (req: Request, res: Response): Promise<void> => {
     try {
       const { symbol, routingNode } = this.validateRequest(req.body, [
         { name: 'symbol', type: 'string' },
         { name: 'routingNode', type: 'string' },
       ]);
 
-      const routingHints = this.service.getRoutingHints(symbol, routingNode);
+      const routingHints = await this.service.getRoutingHints(
+        symbol,
+        routingNode,
+      );
 
       this.successResponse(res, {
         routingHints,
@@ -232,21 +284,30 @@ class Controller {
     }
   };
 
-  public getTransaction = async (req: Request, res: Response): Promise<void> => {
+  public getTransaction = async (
+    req: Request,
+    res: Response,
+  ): Promise<void> => {
     try {
       const { currency, transactionId } = this.validateRequest(req.body, [
         { name: 'currency', type: 'string' },
         { name: 'transactionId', type: 'string' },
       ]);
 
-      const response = await this.service.getTransaction(currency, transactionId);
+      const response = await this.service.getTransaction(
+        currency,
+        transactionId,
+      );
       this.successResponse(res, { transactionHex: response });
     } catch (error) {
       this.errorResponse(req, res, error);
     }
   };
 
-  public getSwapTransaction = async (req: Request, res: Response): Promise<void> => {
+  public getSwapTransaction = async (
+    req: Request,
+    res: Response,
+  ): Promise<void> => {
     try {
       const { id } = this.validateRequest(req.body, [
         { name: 'id', type: 'string' },
@@ -259,14 +320,20 @@ class Controller {
     }
   };
 
-  public broadcastTransaction = async (req: Request, res: Response): Promise<void> => {
+  public broadcastTransaction = async (
+    req: Request,
+    res: Response,
+  ): Promise<void> => {
     try {
       const { currency, transactionHex } = this.validateRequest(req.body, [
         { name: 'currency', type: 'string' },
         { name: 'transactionHex', type: 'string' },
       ]);
 
-      const response = await this.service.broadcastTransaction(currency, transactionHex);
+      const response = await this.service.broadcastTransaction(
+        currency,
+        transactionHex,
+      );
       this.successResponse(res, { transactionId: response });
     } catch (error) {
       this.errorResponse(req, res, error);
@@ -290,7 +357,6 @@ class Controller {
           await this.createReverseSubmarineSwap(req, res);
           break;
       }
-
     } catch (error) {
       this.errorResponse(req, res, error);
     }
@@ -358,6 +424,8 @@ class Controller {
     this.logger.verbose(`Created new Swap with id: ${response.id}`);
     this.logger.silly(`Swap ${response.id}: ${stringify(response)}`);
 
+    delete response.canBeRouted;
+
     this.createdResponse(res, response);
   };
 
@@ -381,7 +449,7 @@ class Controller {
       { name: 'pairHash', type: 'string', optional: true },
       { name: 'referralId', type: 'string', optional: true },
       { name: 'routingNode', type: 'string', optional: true },
-      { name: 'claimAddress', type: 'string', optional: true, },
+      { name: 'claimAddress', type: 'string', optional: true },
       { name: 'invoiceAmount', type: 'number', optional: true },
       { name: 'onchainAmount', type: 'number', optional: true },
       { name: 'prepayMinerFee', type: 'boolean', optional: true },
@@ -418,14 +486,21 @@ class Controller {
         { name: 'pairHash', type: 'string', optional: true },
       ]);
 
-      const response = await this.service.setSwapInvoice(id, invoice.toLowerCase(), pairHash);
+      const response = await this.service.setInvoice(
+        id,
+        invoice.toLowerCase(),
+        pairHash,
+      );
       this.successResponse(res, response);
     } catch (error) {
       this.errorResponse(req, res, error);
     }
   };
 
-  public queryReferrals = async (req: Request, res: Response): Promise<void> => {
+  public queryReferrals = async (
+    req: Request,
+    res: Response,
+  ): Promise<void> => {
     try {
       const referral = await Bouncer.validateRequestAuthentication(req);
       const stats = await ReferralStats.generate(referral.id);
@@ -452,6 +527,11 @@ class Controller {
 
       res.setTimeout(0);
 
+      const lastUpdate = this.pendingSwapInfos.get(id);
+      if (lastUpdate) {
+        this.writeToSse(res, lastUpdate);
+      }
+
       this.pendingSwapStreams.set(id, res);
 
       res.on('close', () => {
@@ -467,7 +547,10 @@ class Controller {
    *
    * @returns the validated arguments
    */
-  private validateRequest = (body: Record<string, any>, argsToCheck: ApiArgument[]) => {
+  private validateRequest = (
+    body: Record<string, any>,
+    argsToCheck: ApiArgument[],
+  ) => {
     const response: any = {};
 
     argsToCheck.forEach((arg) => {
@@ -497,7 +580,12 @@ class Controller {
     return response;
   };
 
-  public errorResponse = (req: Request, res: Response, error: unknown, statusCode = 400): void => {
+  public errorResponse = (
+    req: Request,
+    res: Response,
+    error: unknown,
+    statusCode = 400,
+  ): void => {
     if (typeof error === 'string') {
       this.writeErrorResponse(req, res, statusCode, { error });
     } else {
@@ -505,14 +593,18 @@ class Controller {
 
       // Bitcoin Core related errors
       if (errorObject.details) {
-        this.writeErrorResponse(req, res, statusCode, { error: errorObject.details });
-      // Custom error when broadcasting a refund transaction fails because
-      // the locktime requirement has not been met yet
+        this.writeErrorResponse(req, res, statusCode, {
+          error: errorObject.details,
+        });
+        // Custom error when broadcasting a refund transaction fails because
+        // the locktime requirement has not been met yet
       } else if (errorObject.timeoutBlockHeight) {
         this.writeErrorResponse(req, res, statusCode, error);
-      // Everything else
+        // Everything else
       } else {
-        this.writeErrorResponse(req, res, statusCode, { error: errorObject.message });
+        this.writeErrorResponse(req, res, statusCode, {
+          error: errorObject.message,
+        });
       }
     }
   };
@@ -534,8 +626,17 @@ class Controller {
     res.status(201).json(data);
   };
 
-  private writeErrorResponse = (req: Request, res: Response, statusCode: number, error: unknown) => {
-    this.logger.warn(`Request ${req.url} ${JSON.stringify(req.body)} failed: ${JSON.stringify(error)}`);
+  private writeErrorResponse = (
+    req: Request,
+    res: Response,
+    statusCode: number,
+    error: unknown,
+  ) => {
+    this.logger.warn(
+      `Request ${req.url} ${JSON.stringify(req.body)} failed: ${JSON.stringify(
+        error,
+      )}`,
+    );
 
     this.setContentTypeJson(res);
     res.status(statusCode).json(error);
@@ -561,6 +662,10 @@ class Controller {
     if (preimageHash.length !== 32) {
       throw `invalid preimage hash length: ${preimageHash.length}`;
     }
+  };
+
+  private writeToSse = (res: Response, message: SwapUpdate) => {
+    res.write(`data: ${JSON.stringify(message)}\n\n`);
   };
 }
 

@@ -2,16 +2,20 @@ import { Op } from 'sequelize';
 import AsyncLock from 'async-lock';
 import { EventEmitter } from 'events';
 import Logger from '../Logger';
-import { Invoice } from '../proto/lnd/rpc_pb';
+import ClnClient from '../lightning/ClnClient';
 import LndClient from '../lightning/LndClient';
 import { SwapUpdateEvent } from '../consts/Enums';
 import ReverseSwap from '../db/models/ReverseSwap';
 import { Currency } from '../wallet/WalletManager';
 import { decodeInvoice, getHexBuffer } from '../Utils';
 import ReverseSwapRepository from '../db/repositories/ReverseSwapRepository';
+import { InvoiceState, LightningClient } from '../lightning/LightningClient';
 
 interface LightningNursery {
-  on(event: 'minerfee.invoice.paid', listener: (reverseSwap: ReverseSwap) => void): this;
+  on(
+    event: 'minerfee.invoice.paid',
+    listener: (reverseSwap: ReverseSwap) => void,
+  ): this;
   emit(event: 'minerfee.invoice.paid', reverseSwap: ReverseSwap): boolean;
 
   on(event: 'invoice.paid', listener: (reverseSwap: ReverseSwap) => void): this;
@@ -29,9 +33,19 @@ class LightningNursery extends EventEmitter {
 
   public static errIsInvoicePaid = (error: unknown): boolean => {
     return (
-      (error !== undefined && error !== null) &&
+      error !== undefined &&
+      error !== null &&
       (error as any).code === 6 &&
       (error as any).details === 'invoice is already paid'
+    );
+  };
+
+  public static errIsPaymentInTransition = (error: unknown): boolean => {
+    return (
+      error !== undefined &&
+      error !== null &&
+      (error as any).code === 6 &&
+      (error as any).details === 'payment is in transition'
     );
   };
 
@@ -41,20 +55,26 @@ class LightningNursery extends EventEmitter {
     }
 
     return /^(cltv limit )(\d{1,3}) (should be greater than )(\d{1,3})$/gm.test(
-      (error as any).details
+      (error as any).details,
     );
+  };
+
+  public static errIsInvoiceExpired = (error: string): boolean => {
+    return error.toLowerCase().includes('invoice expired');
   };
 
   public bindCurrencies = (currencies: Currency[]): void => {
     currencies.forEach((currency) => {
-      if (currency.lndClient) {
-        this.listenInvoices(currency.lndClient);
-      }
+      [currency.lndClient, currency.clnClient]
+        .filter(
+          (client): client is LndClient | ClnClient => client !== undefined,
+        )
+        .map(this.listenInvoices);
     });
   };
 
-  private listenInvoices = (lndClient: LndClient) => {
-    lndClient.on('htlc.accepted', async (invoice: string) => {
+  private listenInvoices = (lightningClient: LightningClient) => {
+    lightningClient.on('htlc.accepted', async (invoice: string) => {
       await this.lock.acquire(LightningNursery.invoiceLock, async () => {
         let reverseSwap = await ReverseSwapRepository.getReverseSwap({
           [Op.or]: [
@@ -72,28 +92,48 @@ class LightningNursery extends EventEmitter {
         }
 
         if (reverseSwap.invoice === invoice) {
-          this.logger.verbose(`Hold invoice of Reverse Swap ${reverseSwap.id} was accepted`);
+          this.logger.verbose(
+            `Hold invoice of Reverse Swap ${reverseSwap.id} was accepted`,
+          );
 
-          if (reverseSwap.minerFeeInvoicePreimage === null || reverseSwap.status === SwapUpdateEvent.MinerFeePaid) {
+          if (
+            reverseSwap.minerFeeInvoicePreimage === null ||
+            reverseSwap.status === SwapUpdateEvent.MinerFeePaid
+          ) {
             if (reverseSwap.minerFeeInvoicePreimage) {
-              await lndClient.settleInvoice(getHexBuffer(reverseSwap.minerFeeInvoicePreimage));
+              await lightningClient.settleHoldInvoice(
+                getHexBuffer(reverseSwap.minerFeeInvoicePreimage),
+              );
             }
 
             this.emit('invoice.paid', reverseSwap);
           } else {
-            this.logger.debug(`Did not send onchain coins for Reverse Swap ${reverseSwap!.id} because miner fee invoice was not paid yet`);
+            this.logger.debug(
+              `Did not send onchain coins for Reverse Swap ${
+                reverseSwap!.id
+              } because miner fee invoice was not paid yet`,
+            );
           }
         } else {
-          this.logger.debug(`Minerfee prepayment of Reverse Swap ${reverseSwap.id} was accepted`);
+          this.logger.debug(
+            `Minerfee prepayment of Reverse Swap ${reverseSwap.id} was accepted`,
+          );
 
-          reverseSwap = await ReverseSwapRepository.setReverseSwapStatus(reverseSwap, SwapUpdateEvent.MinerFeePaid);
+          reverseSwap = await ReverseSwapRepository.setReverseSwapStatus(
+            reverseSwap,
+            SwapUpdateEvent.MinerFeePaid,
+          );
           this.emit('minerfee.invoice.paid', reverseSwap);
 
           // Settle the prepay invoice and emit the "invoice.paid" event in case the hold invoice was paid first
-          const holdInvoice = await lndClient.lookupInvoice(getHexBuffer(decodeInvoice(reverseSwap.invoice).paymentHash!));
+          const holdInvoice = await lightningClient.lookupHoldInvoice(
+            getHexBuffer(decodeInvoice(reverseSwap.invoice).paymentHash!),
+          );
 
-          if (holdInvoice.state === Invoice.InvoiceState.ACCEPTED) {
-            await lndClient.settleInvoice(getHexBuffer(reverseSwap.minerFeeInvoicePreimage!));
+          if (holdInvoice.state === InvoiceState.Accepted) {
+            await lightningClient.settleHoldInvoice(
+              getHexBuffer(reverseSwap.minerFeeInvoicePreimage!),
+            );
             this.emit('invoice.paid', reverseSwap);
           }
         }

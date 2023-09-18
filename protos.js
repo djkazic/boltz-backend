@@ -1,24 +1,40 @@
 const path = require('path');
 const childProcess = require('child_process');
 
-const PROTO_DIR = path.join(__dirname, 'proto');
-const LIB_DIR = path.join(__dirname, 'lib/proto');
-const PROTOC_GEN_TS_PATH = path.join(__dirname, 'node_modules/.bin/protoc-gen-ts');
-
-const protoConfig = [
-  `--plugin="protoc-gen-ts=${PROTOC_GEN_TS_PATH}"`,
-  `--grpc_out="grpc_js:${LIB_DIR}"`,
-  `--js_out="import_style=commonjs,binary:${LIB_DIR}"`,
-  `--ts_out="grpc_js:${LIB_DIR}"`,
-];
+const protoDir = path.join(__dirname, 'proto');
+const protoDirHold = path.join(__dirname, 'tools/hold/protos');
+const libDir = path.join(__dirname, 'lib/proto');
+const protocPath = path.join(
+  __dirname,
+  'node_modules/.bin/grpc_tools_node_protoc',
+);
+const protocGenTsPath = path.join(__dirname, 'node_modules/.bin/protoc-gen-ts');
 
 const protoPaths = [
-  `--proto_path ${PROTO_DIR} ${PROTO_DIR}/*.proto`,
-  `--proto_path ${PROTO_DIR} ${PROTO_DIR}/**/*.proto`,
+  [`--proto_path ${protoDir} ${protoDir}/*.proto`, libDir],
+  [`--proto_path ${protoDir} ${protoDir}/**/*.proto`, libDir],
+  [
+    `--proto_path ${protoDirHold} ${protoDirHold}/*.proto`,
+    path.join(libDir, 'hold'),
+  ],
 ];
 
-const PROTOC_PATH = path.join(__dirname, 'node_modules/.bin/grpc_tools_node_protoc');
-
-for (const path of protoPaths) {
-  childProcess.execSync(`${PROTOC_PATH} ${protoConfig.join(' ')} ${path}`);
+for (const [path, lib] of protoPaths) {
+  try {
+    childProcess.execSync(
+      `${protocPath} ${[
+        `--grpc_out="grpc_js:${lib}"`,
+        `--js_out="import_style=commonjs,binary:${lib}"`,
+      ].join(' ')} ${path}`,
+    );
+    childProcess.execSync(
+      `${protocPath} ${[
+        `--plugin="protoc-gen-ts=${protocGenTsPath}"`,
+        `--ts_out="grpc_js:${lib}"`,
+      ].join(' ')} ${path}`,
+    );
+  } catch (e) {
+    console.error(`Could not compile protobuf: ${path}`);
+    console.log(e);
+  }
 }

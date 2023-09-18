@@ -5,7 +5,11 @@ import { getTsString } from './Utils';
 class Logger {
   public static readonly disabledLogger = new Logger('', undefined, true);
 
-  constructor(level: string, filename?: string, private disabled = false) {
+  constructor(
+    level: string,
+    filename?: string,
+    private disabled = false,
+  ) {
     if (disabled) {
       return;
     }
@@ -17,10 +21,12 @@ class Logger {
     ];
 
     if (filename) {
-      transports.push(new winston.transports.File({
-        filename,
-        format: this.getLogFormat(false),
-      }));
+      transports.push(
+        new winston.transports.File({
+          filename,
+          format: this.getLogFormat(false),
+        }),
+      );
     }
 
     winston.configure({
@@ -30,18 +36,29 @@ class Logger {
   }
 
   private getLogFormat = (colorize: boolean) => {
-    return winston.format.printf(info => `${getTsString()} ${this.getLevel(info.level, colorize)}: ${info.message}`);
+    return winston.format.printf(
+      (info) =>
+        `${getTsString()} ${this.getLevel(info.level, colorize)}: ${
+          info.message
+        }`,
+    );
   };
 
   private getLevel = (level: string, colorize: boolean) => {
     if (colorize) {
       switch (level) {
-        case 'error': return red(level);
-        case 'warn': return yellow(level);
-        case 'info': return green(level);
-        case 'verbose': return cyan(level);
-        case 'debug': return blue(level);
-        case 'silly': return magenta(level);
+        case 'error':
+          return red(level);
+        case 'warn':
+          return yellow(level);
+        case 'info':
+          return green(level);
+        case 'verbose':
+          return cyan(level);
+        case 'debug':
+          return blue(level);
+        case 'silly':
+          return magenta(level);
       }
     }
     return level;

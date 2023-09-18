@@ -5,7 +5,9 @@ import { Arguments } from 'yargs';
 import Errors from './consts/Errors';
 import { Network } from './consts/Enums';
 import { PairConfig } from './consts/Types';
+import { ClnConfig } from './lightning/ClnClient';
 import { LndConfig } from './lightning/LndClient';
+import { NodeSwitchConfig } from './swap/NodeSwitch';
 import { WebdavConfig } from './backup/providers/Webdav';
 import { GoogleCloudConfig } from './backup/providers/GoogleCloud';
 import { deepMerge, getServiceDataDir, resolveHome } from './Utils';
@@ -25,31 +27,41 @@ type ChainConfig = {
   zmqpubhashblock?: string;
 
   // API endpoint of a MempoolSpace instance running on the chain of the configured client
+  // Comma seperated for multiple endpoints
   mempoolSpace?: string;
 };
 
-type CurrencyConfig = {
-  symbol: string,
+type BaseCurrencyConfig = {
+  symbol: string;
   network: Network;
 
+  minWalletBalance: number;
+  maxWalletBalance?: number;
+
+  maxZeroConfAmount: number;
+
   chain: ChainConfig;
+};
+
+type RoutingOffsetException = {
+  nodeId: string;
+  offset: number;
+};
+
+type CurrencyConfig = BaseCurrencyConfig & {
+  preferredWallet: 'lnd' | 'core' | undefined;
+
   lnd?: LndConfig;
+  cln?: ClnConfig;
+  routingOffsetExceptions?: RoutingOffsetException[];
 
   // Expiry for invoices of this currency in seconds
   invoiceExpiry?: number;
   // Max fee ratio for LND's sendPayment
   maxPaymentFeeRatio?: number;
 
-  maxSwapAmount: number;
-  minSwapAmount: number;
-
-  minWalletBalance: number;
-  maxWalletBalance?: number;
-
   minLocalBalance: number;
   minRemoteBalance: number;
-
-  maxZeroConfAmount: number;
 };
 
 type TokenConfig = {
@@ -58,9 +70,6 @@ type TokenConfig = {
   // Must not be set for Ether
   decimals?: number;
   contractAddress?: string;
-
-  maxSwapAmount: number;
-  minSwapAmount: number;
 
   minWalletBalance: number;
   maxWalletBalance?: number;
@@ -89,8 +98,8 @@ type ApiConfig = {
 };
 
 type GrpcConfig = {
-  host: string,
-  port: number,
+  host: string;
+  port: number;
 };
 
 type RatesConfig = {
@@ -136,8 +145,12 @@ type ConfigType = {
   backup: BackupConfig;
   notification: NotificationConfig;
 
+  nodeSwitch?: NodeSwitchConfig;
+
   pairs: PairConfig[];
   currencies: CurrencyConfig[];
+
+  liquid?: BaseCurrencyConfig;
 
   ethereum: EthereumConfig;
 };
@@ -164,14 +177,8 @@ class Config {
   constructor() {
     this.dataDir = getServiceDataDir('boltz');
 
-    const {
-      dbpath,
-      backup,
-      logpath,
-      configpath,
-      mnemonicpath,
-      notification,
-    } = this.getDataDirPaths(this.dataDir);
+    const { dbpath, backup, logpath, configpath, mnemonicpath, notification } =
+      this.getDataDirPaths(this.dataDir);
 
     this.config = {
       configpath,
@@ -232,18 +239,24 @@ class Config {
           base: 'LTC',
           quote: 'BTC',
           fee: 5,
+          minSwapAmount: 10000,
+          maxSwapAmount: 10000000,
         },
         {
           base: 'BTC',
           quote: 'BTC',
           fee: 1,
           rate: 1,
+          minSwapAmount: 1000,
+          maxSwapAmount: 10000000,
         },
         {
           base: 'LTC',
           quote: 'LTC',
           fee: 1,
           rate: 1,
+          minSwapAmount: 2000,
+          maxSwapAmount: 20000000,
         },
       ],
 
@@ -252,8 +265,7 @@ class Config {
           symbol: 'BTC',
           network: Network.Testnet,
 
-          maxSwapAmount: 100000,
-          minSwapAmount: 1000,
+          preferredWallet: 'lnd',
 
           minWalletBalance: 1000000,
 
@@ -272,7 +284,14 @@ class Config {
             host: '127.0.0.1',
             port: 10009,
             certpath: path.join(getServiceDataDir('lnd'), 'tls.cert'),
-            macaroonpath: path.join(getServiceDataDir('lnd'), 'data', 'chain', 'bitcoin', Network.Testnet, 'admin.macaroon'),
+            macaroonpath: path.join(
+              getServiceDataDir('lnd'),
+              'data',
+              'chain',
+              'bitcoin',
+              Network.Testnet,
+              'admin.macaroon',
+            ),
             maxPaymentFeeRatio: 0.03,
           },
         },
@@ -280,8 +299,7 @@ class Config {
           symbol: 'LTC',
           network: Network.Testnet,
 
-          maxSwapAmount: 10000000,
-          minSwapAmount: 10000,
+          preferredWallet: 'lnd',
 
           minWalletBalance: 100000000,
 
@@ -300,7 +318,14 @@ class Config {
             host: '127.0.0.1',
             port: 11009,
             certpath: path.join(getServiceDataDir('lnd'), 'tls.cert'),
-            macaroonpath: path.join(getServiceDataDir('lnd'), 'data', 'chain', 'litecoin', Network.Testnet, 'admin.macaroon'),
+            macaroonpath: path.join(
+              getServiceDataDir('lnd'),
+              'data',
+              'chain',
+              'litecoin',
+              Network.Testnet,
+              'admin.macaroon',
+            ),
             maxPaymentFeeRatio: 0.03,
           },
         },
@@ -331,7 +356,10 @@ class Config {
    * This loads arguments specified by the user either with a TOML config file or via command line arguments
    */
   public load = (args: Arguments<any>): ConfigType => {
-    const boltzConfigFile = this.resolveConfigPath(args.configpath, this.config.configpath);
+    const boltzConfigFile = this.resolveConfigPath(
+      args.configpath,
+      this.config.configpath,
+    );
 
     if (fs.existsSync(boltzConfigFile)) {
       const tomlConfig = this.parseTomlConfig(boltzConfigFile);
@@ -353,7 +381,10 @@ class Config {
     }
 
     if (args.currencies) {
-      const currencies = this.parseCurrency(args.currencies, this.config.currencies);
+      const currencies = this.parseCurrency(
+        args.currencies,
+        this.config.currencies,
+      );
       args.currencies = currencies.currencies;
       deepMerge(this.config, currencies);
     }

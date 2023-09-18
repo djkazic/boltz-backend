@@ -4,7 +4,7 @@ Deploying the Boltz backend has to be done with great care since it will have fu
 
 Prerequisites:
 
-* The latest Node.js LTS release (`v16.13.1` as of writing this)
+* The latest Node.js LTS release (`v18.16.1` as of writing this)
 * `rsync` (needed to compile the TypeScript code)
 
 The Boltz backend requires a synced Bitcoin Core or Litecoin Core instance to connect to the Bitcoin or Litecoin chain. These nodes need to:
@@ -99,11 +99,24 @@ base = "LTC"
 quote = "BTC"
 timeoutDelta = 400
 
+maxSwapAmount = 10_000_000
+minSwapAmount = 10_000
+
 [[pairs]]
 base = "BTC"
 quote = "BTC"
 rate = 1
 timeoutDelta = 400
+
+maxSwapAmount = 10_000_000
+minSwapAmount = 10_000
+
+# Alternatively, the timeouts of swaps of a pair can be set like this
+#  [pairs.timeoutDelta]
+#  reverse = 1440
+#  swapMinimal = 1440
+#  swapMaximal = 2880
+
 
 [[pairs]]
 base = "LTC"
@@ -112,6 +125,9 @@ rate = 1
 fee = 0.5
 swapInFee = 0.2
 timeoutDelta = 300
+
+maxSwapAmount = 1_000_000_000
+minSwapAmount = 100_000
 
 # The array "currencies" configures the chain and LND clients for the "pairs"
 # Not configuring the LND client is possible but will cause that chain not to support Lightning
@@ -122,8 +138,6 @@ symbol = "BTC"
 network = "bitcoinTestnet"
 minWalletBalance = 10_000_000
 minChannelBalance = 10_000_000
-maxSwapAmount = 10_000_000
-minSwapAmount = 10_000
 maxZeroConfAmount = 10_000_000
 
   [currencies.chain]
@@ -160,8 +174,6 @@ symbol = "LTC"
 network = "litecoinTestnet"
 minWalletBalance = 20_000_000
 minChannelBalance = 0
-maxSwapAmount = 1_000_000_000
-minSwapAmount = 100_000
 maxZeroConfAmount = 1_000_000_000
 
   [currencies.chain]

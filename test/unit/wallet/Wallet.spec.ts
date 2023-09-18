@@ -3,6 +3,8 @@ import { randomBytes } from 'crypto';
 import ops from '@boltz/bitcoin-ops';
 import { Networks } from 'boltz-core';
 import * as ecc from 'tiny-secp256k1';
+import { SLIP77Factory } from 'slip77';
+import { networks as networkLiquid } from 'liquidjs-lib';
 import { crypto, script, Transaction } from 'bitcoinjs-lib';
 import { generateMnemonic, mnemonicToSeedSync } from 'bip39';
 import Logger from '../../../lib/Logger';
@@ -10,16 +12,20 @@ import Wallet from '../../../lib/wallet/Wallet';
 import Database from '../../../lib/db/Database';
 import { getHexBuffer } from '../../../lib/Utils';
 import { CurrencyType } from '../../../lib/consts/Enums';
+import WalletLiquid from '../../../lib/wallet/WalletLiquid';
 import KeyRepository from '../../../lib/db/repositories/KeyRepository';
 import LndWalletProvider from '../../../lib/wallet/providers/LndWalletProvider';
-import { SentTransaction, WalletBalance } from '../../../lib/wallet/providers/WalletProviderInterface';
+import {
+  SentTransaction,
+  WalletBalance,
+} from '../../../lib/wallet/providers/WalletProviderInterface';
 
 const bip32 = BIP32Factory(ecc);
+const slip77 = SLIP77Factory(ecc);
 
 const symbol = 'BTC';
 
 const balance: WalletBalance = {
-  totalBalance: 3,
   confirmedBalance: 1,
   unconfirmedBalance: 2,
 };
@@ -34,7 +40,8 @@ const sentTransaction: SentTransaction = {
   fee: 1,
   vout: 0,
   transaction: {} as any as Transaction,
-  transactionId: 'b866402106a97f06f84215abf545ef3b455346fd998845731385f6cdcb12d96d',
+  transactionId:
+    'b866402106a97f06f84215abf545ef3b455346fd998845731385f6cdcb12d96d',
 };
 
 const mockSendToAddress = jest.fn().mockResolvedValue(sentTransaction);
@@ -57,7 +64,9 @@ jest.mock('../../../lib/wallet/providers/LndWalletProvider', () => {
 const mockedLndWalletProvider = <jest.Mock<LndWalletProvider>>LndWalletProvider;
 
 describe('Wallet', () => {
-  const encodeOutput = getHexBuffer('00147ca6c71979907c36d5d62f325d6d8104a8497445');
+  const encodeOutput = getHexBuffer(
+    '00147ca6c71979907c36d5d62f325d6d8104a8497445',
+  );
   const encodedAddress = 'bcrt1q0jnvwxtejp7rd4wk9ue96mvpqj5yjaz9v7vte5';
 
   const mnemonic = generateMnemonic();
@@ -78,12 +87,7 @@ describe('Wallet', () => {
     walletProvider,
   );
 
-  wallet.initKeyProvider(
-    network,
-    derivationPath,
-    highestUsedIndex,
-    masterNode,
-  );
+  wallet.initKeyProvider(network, derivationPath, highestUsedIndex, masterNode);
 
   const incrementIndex = () => {
     highestUsedIndex = highestUsedIndex + 1;
@@ -92,6 +96,19 @@ describe('Wallet', () => {
   const getKeysByIndex = (index: number) => {
     return masterNode.derivePath(`${derivationPath}/${index}`);
   };
+
+  const walletLiquid = new WalletLiquid(
+    Logger.disabledLogger,
+    walletProvider,
+    slip77.fromSeed(mnemonic),
+  );
+
+  walletLiquid.initKeyProvider(
+    networkLiquid.liquid,
+    derivationPath,
+    highestUsedIndex,
+    masterNode,
+  );
 
   beforeAll(async () => {
     await database.init();
@@ -103,8 +120,13 @@ describe('Wallet', () => {
     });
   });
 
-  test('should set symbol' , () => {
+  afterAll(async () => {
+    await database.close();
+  });
+
+  test('should init', () => {
     expect(wallet.symbol).toEqual(symbol);
+    expect(wallet.type).toEqual(CurrencyType.BitcoinLike);
   });
 
   test('should get correct address from index', () => {
@@ -139,16 +161,9 @@ describe('Wallet', () => {
 
   test('should ignore all invalid addresses', () => {
     const invalidScripts = [
-      script.compile([
-        ops.OP_1,
-        randomBytes(32),
-      ]),
-      script.compile([
-        randomBytes(32),
-      ]),
-      script.compile([
-        ops.OP_6,
-      ]),
+      script.compile([ops.OP_1, randomBytes(32)]),
+      script.compile([randomBytes(32)]),
+      script.compile([ops.OP_6]),
       script.compile([
         ops.OP_NUMEQUAL,
         ops.OP_4,
@@ -190,7 +205,9 @@ describe('Wallet', () => {
     const amount = 372498;
     const satPerVbyte = 18;
 
-    expect(await wallet.sendToAddress(address, amount, satPerVbyte)).toEqual(sentTransaction);
+    expect(await wallet.sendToAddress(address, amount, satPerVbyte)).toEqual(
+      sentTransaction,
+    );
 
     expect(mockSendToAddress).toHaveBeenCalledTimes(1);
   });
@@ -199,12 +216,23 @@ describe('Wallet', () => {
     const address = 'bcrt1qk4pces7y5csg3qv8gr4ftghgp8gzgg3lv3nwju';
     const satPerVbyte = 2;
 
-    expect(await wallet.sweepWallet(address, satPerVbyte)).toEqual(sentTransaction);
+    expect(await wallet.sweepWallet(address, satPerVbyte)).toEqual(
+      sentTransaction,
+    );
 
     expect(mockSweepWallet).toHaveBeenCalledTimes(1);
   });
 
-  afterAll(async () => {
-    await database.close();
+  test('should blind Liquid addresses', () => {
+    expect(walletLiquid.type).toEqual(CurrencyType.Liquid);
+    expect(
+      walletLiquid.encodeAddress(encodeOutput).startsWith('lq1qq'),
+    ).toBeTruthy();
+  });
+
+  test('should encode unblinded Liquid addresses', () => {
+    expect(
+      walletLiquid.encodeAddress(encodeOutput, false).startsWith('ex'),
+    ).toBeTruthy();
   });
 });

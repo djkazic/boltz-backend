@@ -1,22 +1,45 @@
-import fs from 'fs';
-import toml from '@iarna/toml';
+import { parse } from '@iarna/toml';
+import { existsSync, readFileSync, unlinkSync } from 'fs';
 import Logger from '../../../lib/Logger';
 import Errors from '../../../lib/service/Errors';
 import { ConfigType } from '../../../lib/Config';
+import NodeSwitch from '../../../lib/swap/NodeSwitch';
 import { OrderSide } from '../../../lib/consts/Enums';
 import { PairConfig } from '../../../lib/consts/Types';
-import TimeoutDeltaProvider from '../../../lib/service/TimeoutDeltaProvider';
+import LndClient from '../../../lib/lightning/LndClient';
+import { Currency } from '../../../lib/wallet/WalletManager';
+import EthereumManager from '../../../lib/wallet/ethereum/EthereumManager';
+import TimeoutDeltaProvider, {
+  PairTimeoutBlocksDelta,
+} from '../../../lib/service/TimeoutDeltaProvider';
+import {
+  DecodedInvoice,
+  InvoiceFeature,
+} from '../../../lib/lightning/LightningClient';
 
 const currencies = [
   {
     base: 'BTC',
     quote: 'BTC',
-    timeoutDelta: 360,
+    timeoutDelta: {
+      reverse: 1440,
+      swapMinimal: 360,
+      swapMaximal: 2880,
+    },
   },
   {
     base: 'LTC',
     quote: 'BTC',
     timeoutDelta: 20,
+  },
+  {
+    base: 'L-BTC',
+    quote: 'BTC',
+    timeoutDelta: {
+      reverse: 1440,
+      swapMinimal: 1400,
+      swapMaximal: 2880,
+    },
   },
 ] as any as PairConfig[];
 
@@ -25,98 +48,162 @@ describe('TimeoutDeltaProvider', () => {
   const configpath = 'config.toml';
 
   const cleanup = () => {
-    if (fs.existsSync(configpath)) {
-      fs.unlinkSync(configpath);
+    if (existsSync(configpath)) {
+      unlinkSync(configpath);
     }
   };
 
-  const deltaProvider = new TimeoutDeltaProvider(Logger.disabledLogger, {
-    configpath,
-    pairs: [
-      {
-        base: 'LTC',
-        quote: 'BTC',
-      },
-    ],
-  } as ConfigType);
+  const deltaProvider = new TimeoutDeltaProvider(
+    Logger.disabledLogger,
+    {
+      configpath,
+      pairs: [
+        {
+          base: 'LTC',
+          quote: 'BTC',
+        },
+      ],
+      currencies: [],
+    } as unknown as ConfigType,
+    new Map<string, Currency>(),
+    {} as unknown as EthereumManager,
+    new NodeSwitch(Logger.disabledLogger),
+  );
+
+  const createDeltas = (val: number): PairTimeoutBlocksDelta => {
+    return {
+      reverse: val,
+      swapMinimal: val,
+      swapMaximal: val,
+    };
+  };
 
   beforeAll(() => {
+    cleanup();
+
+    deltaProvider.init(currencies);
+  });
+
+  afterAll(() => {
     cleanup();
   });
 
   test('should init', () => {
-    deltaProvider.init(currencies);
-
     const deltas = deltaProvider['timeoutDeltas'];
 
-    expect(deltas.size).toEqual(2);
-
+    expect(deltas.size).toEqual(currencies.length);
     expect(deltas.get('BTC/BTC')).toEqual({
-      base: 36,
-      quote: 36,
+      base: {
+        reverse: 144,
+        swapMinimal: 36,
+        swapMaximal: 288,
+      },
+      quote: {
+        reverse: 144,
+        swapMinimal: 36,
+        swapMaximal: 288,
+      },
     });
     expect(deltas.get('LTC/BTC')).toEqual({
-      base: 8,
-      quote: 2,
+      base: createDeltas(8),
+      quote: createDeltas(2),
     });
   });
 
   test('should not init if no timeout delta was provided', () => {
-    expect(() => deltaProvider.init([
-      {
-        base: 'should',
-        quote: 'throw',
-      },
-    ] as PairConfig[])).toThrow(Errors.NO_TIMEOUT_DELTA('should/throw').message);
+    expect(() =>
+      deltaProvider.init([
+        {
+          base: 'should',
+          quote: 'throw',
+        },
+      ] as PairConfig[]),
+    ).toThrow(Errors.NO_TIMEOUT_DELTA('should/throw').message);
   });
 
-  test('should get timeout deltas', () => {
+  test('should get timeout deltas', async () => {
     const pairId = 'LTC/BTC';
 
-    expect(deltaProvider.getTimeout(pairId, OrderSide.BUY, true)).toEqual(8);
-    expect(deltaProvider.getTimeout(pairId, OrderSide.BUY, false)).toEqual(2);
+    await expect(
+      deltaProvider.getTimeout(pairId, OrderSide.BUY, true),
+    ).resolves.toEqual([8, false]);
+    await expect(
+      deltaProvider.getTimeout(pairId, OrderSide.BUY, false),
+    ).resolves.toEqual([2, true]);
 
-    expect(deltaProvider.getTimeout(pairId, OrderSide.SELL, true)).toEqual(2);
-    expect(deltaProvider.getTimeout(pairId, OrderSide.SELL, false)).toEqual(8);
+    await expect(
+      deltaProvider.getTimeout(pairId, OrderSide.SELL, true),
+    ).resolves.toEqual([2, false]);
+    await expect(
+      deltaProvider.getTimeout(pairId, OrderSide.SELL, false),
+    ).resolves.toEqual([8, true]);
 
     // Should throw if pair cannot be found
     const notFound = 'notFound';
 
-    expect(() => deltaProvider.getTimeout(notFound, OrderSide.SELL, true)).toThrow(Errors.PAIR_NOT_FOUND(notFound).message);
+    await expect(
+      deltaProvider.getTimeout(notFound, OrderSide.SELL, true),
+    ).rejects.toEqual(Errors.PAIR_NOT_FOUND(notFound));
   });
 
   test('should set timeout deltas', () => {
     const pairId = 'LTC/BTC';
 
-    deltaProvider.setTimeout(pairId, newDelta);
+    deltaProvider.setTimeout(pairId, {
+      reverse: newDelta,
+      swapMinimal: newDelta,
+      swapMaximal: newDelta,
+    });
 
     expect(deltaProvider['timeoutDeltas'].get(pairId)).toEqual({
-      base: 120 / 2.5,
-      quote: 120 / 10,
+      base: createDeltas(120 / 2.5),
+      quote: createDeltas(120 / 10),
     });
 
     // Should throw if pair cannot be found
     const notFound = 'notFound';
 
-    expect(() => deltaProvider.setTimeout(notFound, 20)).toThrow(Errors.PAIR_NOT_FOUND(notFound).message);
+    expect(() => deltaProvider.setTimeout(notFound, createDeltas(20))).toThrow(
+      Errors.PAIR_NOT_FOUND(notFound).message,
+    );
 
     // Should throw if the new delta is invalid
-    expect(() => deltaProvider.setTimeout(pairId, -newDelta)).toThrow(Errors.INVALID_TIMEOUT_BLOCK_DELTA().message);
-    expect(() => deltaProvider.setTimeout(pairId, 5)).toThrow(Errors.INVALID_TIMEOUT_BLOCK_DELTA().message);
+    expect(() =>
+      deltaProvider.setTimeout(pairId, {
+        reverse: -newDelta,
+        swapMinimal: -newDelta,
+        swapMaximal: -newDelta,
+      }),
+    ).toThrow(Errors.INVALID_TIMEOUT_BLOCK_DELTA().message);
+    expect(() =>
+      deltaProvider.setTimeout(pairId, {
+        reverse: 5,
+        swapMinimal: 5,
+        swapMaximal: 5,
+      }),
+    ).toThrow(Errors.INVALID_TIMEOUT_BLOCK_DELTA().message);
   });
 
   test('should write updated timeout deltas to config file', () => {
-    const writtenConfig = toml.parse(fs.readFileSync(configpath, 'utf-8')) as ConfigType;
+    const writtenConfig = parse(
+      readFileSync(configpath, 'utf-8'),
+    ) as ConfigType;
 
-    expect(writtenConfig.pairs[0].timeoutDelta).toEqual(newDelta);
+    expect(writtenConfig.pairs[0].timeoutDelta).toEqual(createDeltas(newDelta));
   });
 
   test('should use Ethereum block times if symbols that are not hardcoded are calculated', () => {
     const minutesToBlocks = deltaProvider['minutesToBlocks'];
 
-    expect(minutesToBlocks('USDT/USDC', 1)).toEqual({
-      base: 5,
-      quote: 5,
+    expect(
+      minutesToBlocks('USDT/USDC', {
+        reverse: 1,
+        swapMinimal: 1,
+        swapMaximal: 1,
+      }),
+    ).toEqual({
+      base: createDeltas(5),
+      quote: createDeltas(5),
     });
   });
 
@@ -128,7 +215,74 @@ describe('TimeoutDeltaProvider', () => {
     expect(TimeoutDeltaProvider.convertBlocks('BTC', 'LTC', 3)).toEqual(12);
   });
 
-  afterAll(() => {
-    cleanup();
+  test('should detect invoice MPP support', async () => {
+    const mockQueryRoutes = jest.fn().mockResolvedValue({ routesList: [] });
+    const lnd = {
+      queryRoutes: mockQueryRoutes,
+    } as unknown as LndClient;
+
+    const dec: DecodedInvoice = {
+      value: 10_000,
+      destination: 'dest',
+      cltvExpiry: 80,
+      routingHints: [],
+      features: new Set<InvoiceFeature>(),
+    };
+
+    const cltvLimit = 123;
+
+    await deltaProvider.checkRoutability(lnd, dec, cltvLimit);
+    expect(mockQueryRoutes).toHaveBeenNthCalledWith(
+      1,
+      dec.destination,
+      dec.value,
+      cltvLimit,
+      dec.cltvExpiry,
+      dec.routingHints,
+    );
+
+    await deltaProvider.checkRoutability(
+      lnd,
+      {
+        ...dec,
+        features: new Set<InvoiceFeature>([InvoiceFeature.MPP]),
+      },
+      cltvLimit,
+    );
+    expect(mockQueryRoutes).toHaveBeenNthCalledWith(
+      2,
+      dec.destination,
+      Math.ceil(dec.value / LndClient.paymentMaxParts),
+      cltvLimit,
+      dec.cltvExpiry,
+      dec.routingHints,
+    );
+  });
+
+  test('should have a floor of 1 sat for querying routes', async () => {
+    const mockQueryRoutes = jest.fn().mockResolvedValue({ routesList: [] });
+    const lnd = {
+      queryRoutes: mockQueryRoutes,
+    } as unknown as LndClient;
+
+    const dec: DecodedInvoice = {
+      value: 0,
+      destination: 'dest',
+      cltvExpiry: 80,
+      routingHints: [],
+      features: new Set<InvoiceFeature>(),
+    };
+
+    const cltvLimit = 210;
+
+    await deltaProvider.checkRoutability(lnd, dec, cltvLimit);
+    expect(mockQueryRoutes).toHaveBeenNthCalledWith(
+      1,
+      dec.destination,
+      1,
+      cltvLimit,
+      dec.cltvExpiry,
+      dec.routingHints,
+    );
   });
 });

@@ -6,7 +6,9 @@ startNodes
 
 bitcoin-cli loadwallet $DEFAULT_WALLET_NAME > /dev/null
 elements-cli loadwallet $DEFAULT_WALLET_NAME > /dev/null
+elements-cli rescanblockchain 0 > /dev/null
 
+startCln
 startLnds
 
 mkdir -p /cookies

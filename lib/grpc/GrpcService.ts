@@ -1,39 +1,103 @@
 import { handleUnaryCall } from '@grpc/grpc-js';
+import { Transaction as TransactionLiquid } from 'liquidjs-lib';
+import { getHexString } from '../Utils';
 import Service from '../service/Service';
+import { parseTransaction } from '../Core';
+import { CurrencyType } from '../consts/Enums';
 import * as boltzrpc from '../proto/boltzrpc_pb';
 
 class GrpcService {
-
   constructor(private service: Service) {}
 
-  public getInfo: handleUnaryCall<boltzrpc.GetInfoRequest, boltzrpc.GetInfoResponse> = async (_, callback) => {
-    try {
-      callback(null, await this.service.getInfo());
-    } catch (error) {
-      callback((error as any), null);
-    }
+  public getInfo: handleUnaryCall<
+    boltzrpc.GetInfoRequest,
+    boltzrpc.GetInfoResponse
+  > = async (call, callback) => {
+    await this.handleCallback(call, callback, () => this.service.getInfo());
   };
 
-  public getBalance: handleUnaryCall<boltzrpc.GetBalanceRequest, boltzrpc.GetBalanceResponse> = async (_, callback) => {
-    try {
-      callback(null, await this.service.getBalance());
-    } catch (error) {
-      callback((error as any), null);
-    }
+  public getBalance: handleUnaryCall<
+    boltzrpc.GetBalanceRequest,
+    boltzrpc.GetBalanceResponse
+  > = async (call, callback) => {
+    await this.handleCallback(call, callback, () => this.service.getBalance());
   };
 
-  public deriveKeys: handleUnaryCall<boltzrpc.DeriveKeysRequest, boltzrpc.DeriveKeysResponse> = async (call, callback) => {
-    try {
+  public deriveKeys: handleUnaryCall<
+    boltzrpc.DeriveKeysRequest,
+    boltzrpc.DeriveKeysResponse
+  > = async (call, callback) => {
+    await this.handleCallback(call, callback, async () => {
       const { symbol, index } = call.request.toObject();
-
-      callback(null, this.service.deriveKeys(symbol, index));
-    } catch (error) {
-      callback((error as any), null);
-    }
+      return this.service.deriveKeys(symbol, index);
+    });
   };
 
-  public getAddress: handleUnaryCall<boltzrpc.GetAddressRequest, boltzrpc.GetAddressResponse> = async (call, callback) => {
-    try {
+  public deriveBlindingKeys: handleUnaryCall<
+    boltzrpc.DeriveBlindingKeyRequest,
+    boltzrpc.DeriveBlindingKeyResponse
+  > = async (call, callback) => {
+    await this.handleCallback(call, callback, async () => {
+      const { address } = call.request.toObject();
+      const { publicKey, privateKey } =
+        this.service.elementsService.deriveBlindingKeys(address);
+
+      const res = new boltzrpc.DeriveBlindingKeyResponse();
+      res.setPublicKey(getHexString(publicKey));
+      res.setPrivateKey(getHexString(privateKey));
+
+      return res;
+    });
+  };
+
+  public unblindOutputs: handleUnaryCall<
+    boltzrpc.UnblindOutputsRequest,
+    boltzrpc.UnblindOutputsResponse
+  > = async (call, callback) => {
+    await this.handleCallback(call, callback, async () => {
+      const outputs =
+        call.request.hasId() && call.request.getId() !== ''
+          ? await this.service.elementsService.unblindOutputsFromId(
+              call.request.getId(),
+            )
+          : await this.service.elementsService.unblindOutputs(
+              parseTransaction(
+                CurrencyType.Liquid,
+                call.request.getHex(),
+              ) as TransactionLiquid,
+            );
+
+      const res = new boltzrpc.UnblindOutputsResponse();
+      res.setOutputsList(
+        outputs.map((out) => {
+          const rpcOut = new boltzrpc.UnblindOutputsResponse.UnblindedOutput();
+          rpcOut.setValue(out.value);
+          rpcOut.setAsset(out.asset);
+          rpcOut.setIsLbtc(out.isLbtc);
+          rpcOut.setScript(out.script);
+          rpcOut.setNonce(out.nonce);
+
+          if (out.rangeProof) {
+            rpcOut.setRangeProof(out.rangeProof);
+          }
+
+          if (out.surjectionProof) {
+            rpcOut.setSurjectionProof(out.surjectionProof);
+          }
+
+          return rpcOut;
+        }),
+      );
+
+      return res;
+    });
+  };
+
+  public getAddress: handleUnaryCall<
+    boltzrpc.GetAddressRequest,
+    boltzrpc.GetAddressResponse
+  > = async (call, callback) => {
+    await this.handleCallback(call, callback, async () => {
       const { symbol } = call.request.toObject();
 
       const address = await this.service.getAddress(symbol);
@@ -41,50 +105,53 @@ class GrpcService {
       const response = new boltzrpc.GetAddressResponse();
       response.setAddress(address);
 
-      callback(null, response);
-    } catch (error) {
-      callback((error as any), null);
-    }
+      return response;
+    });
   };
 
-  public sendCoins: handleUnaryCall<boltzrpc.SendCoinsRequest, boltzrpc.SendCoinsResponse> = async (call, callback) => {
-    try {
-      const { vout, transactionId } = await this.service.sendCoins(call.request.toObject());
+  public sendCoins: handleUnaryCall<
+    boltzrpc.SendCoinsRequest,
+    boltzrpc.SendCoinsResponse
+  > = async (call, callback) => {
+    await this.handleCallback(call, callback, async () => {
+      const { vout, transactionId } = await this.service.sendCoins(
+        call.request.toObject(),
+      );
 
       const response = new boltzrpc.SendCoinsResponse();
       response.setVout(vout);
       response.setTransactionId(transactionId);
 
-      callback(null, response);
-    } catch (error) {
-      callback((error as any), null);
-    }
+      return response;
+    });
   };
 
-  public updateTimeoutBlockDelta: handleUnaryCall<boltzrpc.UpdateTimeoutBlockDeltaRequest, boltzrpc.UpdateTimeoutBlockDeltaResponse> = async (call, callback) => {
-    try {
-      const { pair, newDelta } = call.request.toObject();
+  public updateTimeoutBlockDelta: handleUnaryCall<
+    boltzrpc.UpdateTimeoutBlockDeltaRequest,
+    boltzrpc.UpdateTimeoutBlockDeltaResponse
+  > = async (call, callback) => {
+    await this.handleCallback(call, callback, async () => {
+      const { pair, reverseTimeout, swapMinimalTimeout, swapMaximalTimeout } =
+        call.request.toObject();
 
-      this.service.updateTimeoutBlockDelta(pair, newDelta);
+      this.service.updateTimeoutBlockDelta(pair, {
+        reverse: reverseTimeout,
+        swapMinimal: swapMinimalTimeout,
+        swapMaximal: swapMaximalTimeout,
+      });
 
-      callback(null, new boltzrpc.UpdateTimeoutBlockDeltaResponse());
-    } catch (error) {
-      callback((error as any), null);
-    }
+      return new boltzrpc.UpdateTimeoutBlockDeltaResponse();
+    });
   };
 
-  public addReferral: handleUnaryCall<boltzrpc.AddReferralRequest, boltzrpc.AddReferralResponse> = async (call, callback) => {
-    try {
-      const {
-        id,
-        feeShare,
-        routingNode,
-      } = call.request.toObject();
+  public addReferral: handleUnaryCall<
+    boltzrpc.AddReferralRequest,
+    boltzrpc.AddReferralResponse
+  > = async (call, callback) => {
+    await this.handleCallback(call, callback, async () => {
+      const { id, feeShare, routingNode } = call.request.toObject();
 
-      const {
-        apiKey,
-        apiSecret,
-      } = await this.service.addReferral({
+      const { apiKey, apiSecret } = await this.service.addReferral({
         id,
         feeShare,
         routingNode: routingNode === '' ? undefined : routingNode,
@@ -95,9 +162,19 @@ class GrpcService {
       response.setApiKey(apiKey);
       response.setApiSecret(apiSecret);
 
-      callback(null, response);
+      return response;
+    });
+  };
+
+  private handleCallback = async <R, T>(
+    call: R,
+    callback: (error: any, res: T | null) => void,
+    handler: (call: R) => Promise<T>,
+  ) => {
+    try {
+      callback(null, await handler(call));
     } catch (error) {
-      callback((error as any), null);
+      callback(typeof error === 'string' ? { message: error } : error, null);
     }
   };
 }

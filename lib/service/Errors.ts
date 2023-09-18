@@ -55,10 +55,6 @@ export default {
     message: `could not find timeout delta of pair: ${pairId}`,
     code: concatErrorCode(ErrorCodePrefix.Service, 14),
   }),
-  NO_LND_CLIENT: (symbol: string): Error => ({
-    message: `${symbol} has no LND client`,
-    code: concatErrorCode(ErrorCodePrefix.Service, 15),
-  }),
   SWAP_WITH_PREIMAGE_EXISTS: (): Error => ({
     message: 'a swap with this preimage hash exists already',
     code: concatErrorCode(ErrorCodePrefix.Service, 17),
@@ -75,11 +71,17 @@ export default {
     message: `invoice amount exceeds the maximal of ${maxInvoiceAmount}`,
     code: concatErrorCode(ErrorCodePrefix.Service, 21),
   }),
-  EXCEEDS_MAX_INBOUND_LIQUIDITY: (inboundLiquidity: number, maxInboundLiquidity: number): Error => ({
+  EXCEEDS_MAX_INBOUND_LIQUIDITY: (
+    inboundLiquidity: number,
+    maxInboundLiquidity: number,
+  ): Error => ({
     message: `inbound liquidity ${inboundLiquidity} exceeds maximal ${maxInboundLiquidity}`,
     code: concatErrorCode(ErrorCodePrefix.Service, 22),
   }),
-  BENEATH_MIN_INBOUND_LIQUIDITY: (inboundLiquidity: number, minInboundLiquidity: number): Error => ({
+  BENEATH_MIN_INBOUND_LIQUIDITY: (
+    inboundLiquidity: number,
+    minInboundLiquidity: number,
+  ): Error => ({
     message: `inbound liquidity ${inboundLiquidity} is less than minimal ${minInboundLiquidity}`,
     code: concatErrorCode(ErrorCodePrefix.Service, 23),
   }),
@@ -114,5 +116,13 @@ export default {
   AMP_INVOICES_NOT_SUPPORTED: (): Error => ({
     message: 'AMP invoices not supported',
     code: concatErrorCode(ErrorCodePrefix.Service, 31),
+  }),
+  MIN_EXPIRY_TOO_BIG: (
+    swapMaximal: number,
+    minFinalCltvExpiry: number,
+    routingOffset: number,
+  ): Error => ({
+    message: `minimal swap expiry ${minFinalCltvExpiry} plus the routing offset ${routingOffset} minutes is greater than max swap timeout ${swapMaximal}`,
+    code: concatErrorCode(ErrorCodePrefix.Service, 32),
   }),
 };

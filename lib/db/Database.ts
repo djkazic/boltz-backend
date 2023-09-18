@@ -13,6 +13,8 @@ import ChannelCreation from './models/ChannelCreation';
 import PendingEthereumTransaction from './models/PendingEthereumTransaction';
 
 class Database {
+  public static readonly memoryDatabase = ':memory:';
+
   public static sequelize: Sequelize.Sequelize;
 
   private migration: Migration;
@@ -21,7 +23,10 @@ class Database {
    * @param logger logger that should be used
    * @param storage the file path to the SQLite database; if ':memory:' the database will be stored in the memory
    */
-  constructor(private logger: Logger, private storage: string) {
+  constructor(
+    private logger: Logger,
+    private storage: string,
+  ) {
     Database.sequelize = new Sequelize.Sequelize({
       storage,
       dialect: 'sqlite',
@@ -36,7 +41,11 @@ class Database {
   public init = async (): Promise<void> => {
     try {
       await Database.sequelize.authenticate();
-      this.logger.info(`Connected to database: ${this.storage === ':memory:' ? 'in memory' : this.storage}`);
+      this.logger.info(
+        `Connected to database: ${
+          this.storage === ':memory:' ? 'in memory' : this.storage
+        }`,
+      );
     } catch (error) {
       this.logger.error(`Could not connect to database: ${error}`);
       throw error;
@@ -51,10 +60,7 @@ class Database {
       PendingEthereumTransaction.sync(),
     ]);
 
-    await Promise.all([
-      Swap.sync(),
-      ReverseSwap.sync(),
-    ]);
+    await Promise.all([Swap.sync(), ReverseSwap.sync()]);
 
     await ChannelCreation.sync();
   };

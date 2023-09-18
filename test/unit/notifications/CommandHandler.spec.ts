@@ -1,19 +1,22 @@
 import { wait } from '../../Utils';
 import Logger from '../../../lib/Logger';
-import { stringify } from '../../../lib/Utils';
+import { getHexBuffer, getHexString, stringify } from '../../../lib/Utils';
 import Database from '../../../lib/db/Database';
 import Service from '../../../lib/service/Service';
 import { NotificationConfig } from '../../../lib/Config';
+import { Balances, GetBalanceResponse } from '../../../lib/proto/boltzrpc_pb';
 import ReferralStats from '../../../lib/data/ReferralStats';
 import BackupScheduler from '../../../lib/backup/BackupScheduler';
 import DiscordClient from '../../../lib/notifications/DiscordClient';
 import CommandHandler from '../../../lib/notifications/CommandHandler';
 import PairRepository from '../../../lib/db/repositories/PairRepository';
 import SwapRepository from '../../../lib/db/repositories/SwapRepository';
-import { satoshisToCoins, coinsToSatoshis } from '../../../lib/DenominationConverter';
 import ReverseSwapRepository from '../../../lib/db/repositories/ReverseSwapRepository';
-import { Balance, WalletBalance, LightningBalance } from '../../../lib/proto/boltzrpc_pb';
 import ChannelCreationRepository from '../../../lib/db/repositories/ChannelCreationRepository';
+import {
+  satoshisToCoins,
+  coinsToSatoshis,
+} from '../../../lib/DenominationConverter';
 import {
   swapExample,
   channelSwapExample,
@@ -46,32 +49,33 @@ jest.mock('../../../lib/notifications/DiscordClient', () => {
 
 const referralStats = 'referralStats';
 
-const mockGenerateReferralStats = jest.fn().mockImplementation(() => Promise.resolve(referralStats));
+const mockGenerateReferralStats = jest
+  .fn()
+  .mockImplementation(() => Promise.resolve(referralStats));
 
 jest.mock('../../../lib/data/ReferralStats');
 
-const mockedDiscordClient = <jest.Mock<DiscordClient>><any>DiscordClient;
+const mockedDiscordClient = <jest.Mock<DiscordClient>>(<any>DiscordClient);
 
 const createWalletBalance = () => {
-  const walletBalance = new WalletBalance();
+  const walletBalance = new Balances.WalletBalance();
 
-  walletBalance.setTotalBalance(getRandomNumber());
-  walletBalance.setConfirmedBalance(getRandomNumber());
-  walletBalance.setUnconfirmedBalance(getRandomNumber());
+  walletBalance.setConfirmed(getRandomNumber());
+  walletBalance.setUnconfirmed(getRandomNumber());
 
   return walletBalance;
 };
 
-const btcBalance = new Balance();
+const btcBalance = new Balances();
 
-btcBalance.setWalletBalance(createWalletBalance());
+btcBalance.getWalletsMap().set('Core', createWalletBalance());
 
-const lightningBalance = new LightningBalance();
+const lightningBalance = new Balances.LightningBalance();
 
-lightningBalance.setLocalBalance(getRandomNumber());
-lightningBalance.setRemoteBalance(getRandomNumber());
+lightningBalance.setLocal(getRandomNumber());
+lightningBalance.setRemote(getRandomNumber());
 
-btcBalance.setLightningBalance(lightningBalance);
+btcBalance.getLightningMap().set('LND', lightningBalance);
 
 const newAddress = 'bcrt1qymqsjl5qre2zc94wd04nd27p5vkvxqge7f0a8k';
 
@@ -79,40 +83,47 @@ const database = new Database(Logger.disabledLogger, ':memory:');
 
 const mockGetAddress = jest.fn().mockResolvedValue(newAddress);
 
-const invoicePreimage = '765895dd514ce9358f1412c6b416d6a8f8ecea1a4e442d1e15ea8b76152fd241';
-const mockPayInvoice = jest.fn().mockImplementation(async (_: string, invoice: string) => {
-  if (invoice !== 'throw') {
-    return {
-      paymentPreimage: invoicePreimage,
-    };
-  } else {
-    throw 'lnd error';
-  }
-});
+const invoicePreimage = getHexBuffer(
+  '765895dd514ce9358f1412c6b416d6a8f8ecea1a4e442d1e15ea8b76152fd241',
+);
+const mockPayInvoice = jest
+  .fn()
+  .mockImplementation(async (_: string, invoice: string) => {
+    if (invoice !== 'throw') {
+      return {
+        preimage: invoicePreimage,
+      };
+    } else {
+      throw 'lnd error';
+    }
+  });
 
-const transactionId = '05cde2d7f0067604e3de2d2ce3e417dfd0dabecb63550a2b641b2d6cd3061780';
+const transactionId =
+  '05cde2d7f0067604e3de2d2ce3e417dfd0dabecb63550a2b641b2d6cd3061780';
 const transactionVout = 1;
-const mockSendCoins = jest.fn().mockImplementation(async (args: {
-  address: string,
-}) => {
-  if (args.address !== 'throw') {
-    return {
-      transactionId,
-      vout: transactionVout,
-    };
-  } else {
-    throw 'onchain error';
-  }
-});
+const mockSendCoins = jest
+  .fn()
+  .mockImplementation(async (args: { address: string }) => {
+    if (args.address !== 'throw') {
+      return {
+        transactionId,
+        vout: transactionVout,
+      };
+    } else {
+      throw 'onchain error';
+    }
+  });
 
 jest.mock('../../../lib/service/Service', () => {
   return jest.fn().mockImplementation(() => {
     return {
-      getBalance: () => Promise.resolve({
-        getBalancesMap: () => new Map<string, Balance>([
-          ['BTC', btcBalance],
-        ]),
-      }),
+      getBalance: async () => {
+        const res = new GetBalanceResponse();
+
+        res.getBalancesMap().set('BTC', btcBalance);
+
+        return res;
+      },
       getAddress: mockGetAddress,
       payInvoice: mockPayInvoice,
       sendCoins: mockSendCoins,
@@ -120,9 +131,11 @@ jest.mock('../../../lib/service/Service', () => {
   });
 });
 
-const mockedService = <jest.Mock<Service>><any>Service;
+const mockedService = <jest.Mock<Service>>(<any>Service);
 
-const mockUploadDatabase = jest.fn().mockImplementation(() => Promise.resolve());
+const mockUploadDatabase = jest
+  .fn()
+  .mockImplementation(() => Promise.resolve());
 
 jest.mock('../../../lib/backup/BackupScheduler', () => {
   return jest.fn().mockImplementation(() => {
@@ -132,7 +145,9 @@ jest.mock('../../../lib/backup/BackupScheduler', () => {
   });
 });
 
-const mockedBackupScheduler = <jest.Mock<BackupScheduler>><any>BackupScheduler;
+const mockedBackupScheduler = <jest.Mock<BackupScheduler>>(
+  (<any>BackupScheduler)
+);
 
 const mockVerify = jest.fn().mockImplementation((token: string) => {
   return token === 'valid';
@@ -203,20 +218,20 @@ describe('CommandHandler', () => {
     await wait(5);
 
     expect(mockSendMessage).toHaveBeenCalledTimes(1);
-    // tslint:disable-next-line: prefer-template
-    expect(mockSendMessage).toHaveBeenCalledWith('Commands:\n\n' +
-      '**help**: gets a list of all available commands\n' +
-      '**getfees**: gets accumulated fees\n' +
-      '**swapinfo**: gets all available information about a (reverse) swap\n' +
-      '**getstats**: gets stats of all successful swaps\n' +
-      '**getbalance**: gets the balance of the wallets and channels\n' +
-      '**lockedfunds**: gets funds locked up by Boltz\n' +
-      '**pendingswaps**: gets a list of pending (reverse) swaps\n' +
-      '**getreferrals**: gets stats for all referral IDs\n' +
-      '**backup**: uploads a backup of the databases\n' +
-      '**withdraw**: withdraws coins from Boltz\n' +
-      '**getaddress**: gets an address for a currency\n' +
-      '**togglereverse**: enables or disables reverse swaps',
+    expect(mockSendMessage).toHaveBeenCalledWith(
+      'Commands:\n\n' +
+        '**help**: gets a list of all available commands\n' +
+        '**getfees**: gets accumulated fees\n' +
+        '**swapinfo**: gets all available information about a (reverse) swap\n' +
+        '**getstats**: gets stats of all successful swaps\n' +
+        '**getbalance**: gets the balance of the wallets and channels\n' +
+        '**lockedfunds**: gets funds locked up by Boltz\n' +
+        '**pendingswaps**: gets a list of pending (reverse) swaps\n' +
+        '**getreferrals**: gets stats for all referral IDs\n' +
+        '**backup**: uploads a backup of the databases\n' +
+        '**withdraw**: withdraws coins from Boltz\n' +
+        '**getaddress**: gets an address for a currency\n' +
+        '**togglereverse**: enables or disables reverse swaps',
     );
   });
 
@@ -226,7 +241,9 @@ describe('CommandHandler', () => {
     await wait(5);
 
     expect(mockSendMessage).toHaveBeenCalledTimes(1);
-    expect(mockSendMessage).toHaveBeenCalledWith('`getfees`: gets accumulated fees');
+    expect(mockSendMessage).toHaveBeenCalledWith(
+      '`getfees`: gets accumulated fees',
+    );
 
     // Should send the description and the usage for commands that have arguments
     sendMessage('help help');
@@ -246,7 +263,9 @@ describe('CommandHandler', () => {
 
     expect(mockSendMessage).toHaveBeenCalledTimes(1);
     expect(mockSendMessage).toHaveBeenLastCalledWith(
-      `Fees:\n\n**BTC**: ${satoshisToCoins(swapExample.fee! + reverseSwapExample.fee)} BTC`,
+      `Fees:\n\n**BTC**: ${satoshisToCoins(
+        swapExample.fee! + reverseSwapExample.fee,
+      )} BTC`,
     );
   });
 
@@ -257,7 +276,9 @@ describe('CommandHandler', () => {
 
     expect(mockSendMessage).toHaveBeenCalledTimes(1);
     expect(mockSendMessage).toHaveBeenCalledWith(
-      `Swap \`${swapExample.id}\`:\n\`\`\`${stringify(await SwapRepository.getSwap({ id: swapExample.id }))}\`\`\``,
+      `Swap \`${swapExample.id}\`:\n\`\`\`${stringify(
+        await SwapRepository.getSwap({ id: swapExample.id }),
+      )}\`\`\``,
     );
 
     // Channel Creation Swap
@@ -266,10 +287,15 @@ describe('CommandHandler', () => {
 
     expect(mockSendMessage).toHaveBeenCalledTimes(2);
     expect(mockSendMessage).toHaveBeenCalledWith(
-      // tslint:disable-next-line:prefer-template
       `Channel Creation \`${channelSwapExample.id}\`:\n\`\`\`` +
-      `${stringify(await SwapRepository.getSwap({ id: channelSwapExample.id })) }\n` +
-      `${stringify(await ChannelCreationRepository.getChannelCreation({ swapId: channelSwapExample.id }))}\`\`\``,
+        `${stringify(
+          await SwapRepository.getSwap({ id: channelSwapExample.id }),
+        )}\n` +
+        `${stringify(
+          await ChannelCreationRepository.getChannelCreation({
+            swapId: channelSwapExample.id,
+          }),
+        )}\`\`\``,
     );
 
     // Reverse Swap
@@ -278,9 +304,11 @@ describe('CommandHandler', () => {
 
     expect(mockSendMessage).toHaveBeenCalledTimes(3);
     expect(mockSendMessage).toHaveBeenCalledWith(
-      `Reverse Swap \`${reverseSwapExample.id}\`:\n\`\`\`${
-        stringify(await ReverseSwapRepository.getReverseSwap({ id: reverseSwapExample.id }))
-      }\`\`\``,
+      `Reverse Swap \`${reverseSwapExample.id}\`:\n\`\`\`${stringify(
+        await ReverseSwapRepository.getReverseSwap({
+          id: reverseSwapExample.id,
+        }),
+      )}\`\`\``,
     );
 
     const errorMessage = 'Could not find swap with id: ';
@@ -322,24 +350,30 @@ describe('CommandHandler', () => {
             },
           },
         },
-      },
-    )}\`\`\``);
+      })}\`\`\``,
+    );
   });
 
   test('should get balances', async () => {
     sendMessage('getbalance');
     await wait(5);
 
-    const lightningBalance = btcBalance.getLightningBalance()!;
+    const wallet: Balances.WalletBalance = btcBalance
+      .getWalletsMap()
+      .get('Core');
+    const lightning: Balances.LightningBalance = btcBalance
+      .getLightningMap()
+      .get('LND');
 
     expect(mockSendMessage).toHaveBeenCalledTimes(1);
     expect(mockSendMessage).toHaveBeenCalledWith(
-      // tslint:disable-next-line: prefer-template
       'Balances:\n\n' +
-      `**BTC**\nWallet: ${satoshisToCoins(btcBalance.getWalletBalance()!.getTotalBalance())} BTC\n\n` +
-      'LND:\n' +
-      `  Local: ${satoshisToCoins(lightningBalance.getLocalBalance())} BTC\n` +
-      `  Remote: ${satoshisToCoins(lightningBalance.getRemoteBalance())} BTC`,
+        `**BTC**\n\nCore Wallet: ${satoshisToCoins(
+          wallet.getConfirmed() + wallet.getUnconfirmed(),
+        )} BTC\n\n` +
+        'LND:\n' +
+        `  Local: ${satoshisToCoins(lightning.getLocal())} BTC\n` +
+        `  Remote: ${satoshisToCoins(lightning.getRemote())} BTC`,
     );
   });
 
@@ -349,11 +383,10 @@ describe('CommandHandler', () => {
 
     expect(mockSendMessage).toHaveBeenCalledTimes(1);
     expect(mockSendMessage).toHaveBeenCalledWith(
-      // tslint:disable-next-line: prefer-template
       '**Locked up funds:**\n\n' +
-      '**BTC**\n' +
-      '  - `r654321`: 0.01\n' +
-      '\nTotal: 0.01\n',
+        '**BTC**\n' +
+        '  - `r654321`: 0.01\n' +
+        '\nTotal: 0.01\n',
     );
   });
 
@@ -364,9 +397,9 @@ describe('CommandHandler', () => {
     expect(mockSendMessage).toHaveBeenCalledTimes(1);
     expect(mockSendMessage).toHaveBeenCalledWith(
       '\n\n**Pending Swaps:**\n\n' +
-      `- \`${pendingSwapExample.id}\`\n\n` +
-      '**Pending reverse Swaps:**\n\n' +
-      `- \`${pendingReverseSwapExample.id}\`\n`,
+        `- \`${pendingSwapExample.id}\`\n\n` +
+        '**Pending reverse Swaps:**\n\n' +
+        `- \`${pendingReverseSwapExample.id}\`\n`,
     );
   });
 
@@ -387,7 +420,9 @@ describe('CommandHandler', () => {
     expect(mockUploadDatabase).toHaveBeenCalledTimes(1);
 
     expect(mockSendMessage).toHaveBeenCalledTimes(1);
-    expect(mockSendMessage).toHaveBeenCalledWith('Uploaded backup of Boltz database');
+    expect(mockSendMessage).toHaveBeenCalledWith(
+      'Uploaded backup of Boltz database',
+    );
   });
 
   test('should withdraw coins', async () => {
@@ -402,10 +437,15 @@ describe('CommandHandler', () => {
     expect(mockVerify).toHaveBeenCalledTimes(1);
 
     expect(mockPayInvoice).toHaveBeenCalledTimes(1);
-    expect(mockPayInvoice).toHaveBeenCalledWith(currency.toUpperCase(), invoice);
+    expect(mockPayInvoice).toHaveBeenCalledWith(
+      currency.toUpperCase(),
+      invoice,
+    );
 
     expect(mockSendMessage).toHaveBeenCalledTimes(1);
-    expect(mockSendMessage).toHaveBeenCalledWith(`Paid lightning invoice\nPreimage: ${invoicePreimage}`);
+    expect(mockSendMessage).toHaveBeenCalledWith(
+      `Paid lightning invoice\nPreimage: ${getHexString(invoicePreimage)}`,
+    );
 
     // Send onchain coins and respond with transaction id and vout
     const address = 'address';
@@ -425,7 +465,9 @@ describe('CommandHandler', () => {
     });
 
     expect(mockSendMessage).toHaveBeenCalledTimes(2);
-    expect(mockSendMessage).toHaveBeenCalledWith(`Sent transaction: ${transactionId}:${transactionVout}`);
+    expect(mockSendMessage).toHaveBeenCalledWith(
+      `Sent transaction: ${transactionId}:${transactionVout}`,
+    );
 
     // Send all onchain coins
     sendMessage(`withdraw valid ${currency} ${address} all`);
@@ -442,7 +484,9 @@ describe('CommandHandler', () => {
     });
 
     expect(mockSendMessage).toHaveBeenCalledTimes(3);
-    expect(mockSendMessage).toHaveBeenCalledWith(`Sent transaction: ${transactionId}:${transactionVout}`);
+    expect(mockSendMessage).toHaveBeenCalledWith(
+      `Sent transaction: ${transactionId}:${transactionVout}`,
+    );
 
     // Send an error if paying a lighting invoice fails
     const throwInvoice = 'throw';
@@ -453,10 +497,15 @@ describe('CommandHandler', () => {
     expect(mockVerify).toHaveBeenCalledTimes(4);
 
     expect(mockPayInvoice).toHaveBeenCalledTimes(2);
-    expect(mockPayInvoice).toHaveBeenCalledWith(currency.toUpperCase(), throwInvoice);
+    expect(mockPayInvoice).toHaveBeenCalledWith(
+      currency.toUpperCase(),
+      throwInvoice,
+    );
 
     expect(mockSendMessage).toHaveBeenCalledTimes(4);
-    expect(mockSendMessage).toHaveBeenCalledWith('Could not pay lightning invoice: lnd error');
+    expect(mockSendMessage).toHaveBeenCalledWith(
+      'Could not pay lightning invoice: lnd error',
+    );
 
     // Send an error if sending onchain coins fails
     const throwAddress = 'throw';
@@ -475,7 +524,9 @@ describe('CommandHandler', () => {
     });
 
     expect(mockSendMessage).toHaveBeenCalledTimes(5);
-    expect(mockSendMessage).toHaveBeenCalledWith('Could not send coins: onchain error');
+    expect(mockSendMessage).toHaveBeenCalledWith(
+      'Could not send coins: onchain error',
+    );
 
     // Send an error if an invalid number of arguments is provided
     sendMessage('withdraw');
@@ -510,7 +561,9 @@ describe('CommandHandler', () => {
     await wait(5);
 
     expect(mockSendMessage).toHaveBeenCalledTimes(2);
-    expect(mockSendMessage).toHaveBeenCalledWith('Could not get address: no currency was specified');
+    expect(mockSendMessage).toHaveBeenCalledWith(
+      'Could not get address: no currency was specified',
+    );
   });
 
   test('should toggle reverse swaps', async () => {

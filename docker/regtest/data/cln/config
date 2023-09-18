@@ -1,0 +1,14 @@
+network=regtest
+bind-addr=127.0.0.1:9737
+
+log-file=/root/.lightning/cln.log
+
+fee-base=0
+fee-per-satoshi=1
+large-channels
+
+grpc-port=9291
+
+dev-fast-gossip
+dev-fast-reconnect
+dev-bitcoind-poll=5

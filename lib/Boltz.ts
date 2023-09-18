@@ -2,20 +2,26 @@ import fs from 'fs';
 import { Arguments } from 'yargs';
 import { Networks } from 'boltz-core';
 import { generateMnemonic } from 'bip39';
+import { Networks as LiquidNetworks } from 'boltz-core/dist/lib/liquid';
 import Api from './api/Api';
 import Logger from './Logger';
+import { setup } from './Core';
 import Database from './db/Database';
 import Service from './service/Service';
 import VersionCheck from './VersionCheck';
 import GrpcServer from './grpc/GrpcServer';
+import NodeSwitch from './swap/NodeSwitch';
 import ChainTip from './db/models/ChainTip';
 import GrpcService from './grpc/GrpcService';
+import ClnClient from './lightning/ClnClient';
 import LndClient from './lightning/LndClient';
 import ChainClient from './chain/ChainClient';
 import Config, { ConfigType } from './Config';
 import { CurrencyType } from './consts/Enums';
 import { formatError, getVersion } from './Utils';
+import ElementsClient from './chain/ElementsClient';
 import BackupScheduler from './backup/BackupScheduler';
+import { LightningClient } from './lightning/LightningClient';
 import EthereumManager from './wallet/ethereum/EthereumManager';
 import WalletManager, { Currency } from './wallet/WalletManager';
 import ChainTipRepository from './db/repositories/ChainTipRepository';
@@ -26,6 +32,7 @@ class Boltz {
   private readonly config: ConfigType;
 
   private readonly service!: Service;
+  private readonly backup: BackupScheduler;
   private readonly walletManager: WalletManager;
 
   private readonly currencies: Map<string, Currency>;
@@ -44,9 +51,18 @@ class Boltz {
 
     this.logger.info(`Starting Boltz ${getVersion()}`);
 
-    process.on('unhandledRejection', ((reason) => {
+    process.on('unhandledRejection', (reason, promise) => {
+      console.log(promise);
       this.logger.error(`Unhandled rejection: ${formatError(reason)}`);
-    }));
+    });
+
+    process.on('uncaughtException', (error) => {
+      this.logger.error(`Uncaught exception: ${formatError(error)}`);
+    });
+
+    process.on('exit', (code) => {
+      this.logger.error(`Application shutting down with code: ${code}`);
+    });
 
     this.db = new Database(this.logger, this.config.dbpath);
 
@@ -56,7 +72,9 @@ class Boltz {
         this.config.ethereum,
       );
     } catch (error) {
-      this.logger.warn(`Disabled Ethereum integration because: ${formatError(error)}`);
+      this.logger.warn(
+        `Disabled Ethereum integration because: ${formatError(error)}`,
+      );
     }
 
     this.currencies = this.parseCurrencies();
@@ -64,12 +82,23 @@ class Boltz {
     const walletCurrencies = Array.from(this.currencies.values());
 
     if (fs.existsSync(this.config.mnemonicpath)) {
-      this.walletManager = new WalletManager(this.logger, this.config.mnemonicpath, walletCurrencies, this.ethereumManager);
+      this.walletManager = new WalletManager(
+        this.logger,
+        this.config.mnemonicpath,
+        walletCurrencies,
+        this.ethereumManager,
+      );
     } else {
       const mnemonic = generateMnemonic();
       this.logger.info(`Generated new mnemonic: ${mnemonic}`);
 
-      this.walletManager = WalletManager.fromMnemonic(this.logger, mnemonic, this.config.mnemonicpath, walletCurrencies, this.ethereumManager);
+      this.walletManager = WalletManager.fromMnemonic(
+        this.logger,
+        mnemonic,
+        this.config.mnemonicpath,
+        walletCurrencies,
+        this.ethereumManager,
+      );
     }
 
     try {
@@ -77,10 +106,11 @@ class Boltz {
         this.logger,
         this.config,
         this.walletManager,
+        new NodeSwitch(this.logger, this.config.nodeSwitch),
         this.currencies,
       );
 
-      const backup = new BackupScheduler(
+      this.backup = new BackupScheduler(
         this.logger,
         this.config.dbpath,
         this.config.backup,
@@ -90,7 +120,7 @@ class Boltz {
       this.notifications = new NotificationProvider(
         this.logger,
         this.service,
-        backup,
+        this.backup,
         this.config.notification,
         this.config.currencies,
         this.config.ethereum.tokens,
@@ -102,11 +132,7 @@ class Boltz {
         new GrpcService(this.service),
       );
 
-      this.api = new Api(
-        this.logger,
-        this.config.api,
-        this.service,
-      );
+      this.api = new Api(this.logger, this.config.api, this.service);
     } catch (error) {
       this.logger.error(`Could not start Boltz: ${formatError(error)}`);
       // eslint-disable-next-line no-process-exit
@@ -115,24 +141,38 @@ class Boltz {
   }
 
   public start = async (): Promise<void> => {
+    await setup();
+
     try {
       await this.db.migrate(this.currencies);
       await this.db.init();
+      await this.backup.init();
 
       // Query the chain tips now to avoid them being updated after the chain clients are initialized
       const chainTips = await ChainTipRepository.getChainTips();
 
-      for (const [, currency] of this.currencies) {
-        if (currency.chainClient) {
-          await this.connectChainClient(currency.chainClient);
+      await Promise.all(
+        Array.from(this.currencies.values()).flatMap((currency) => {
+          const prms: Promise<void>[] = [];
 
-          if (currency.lndClient) {
-            await this.connectLnd(currency.lndClient);
+          if (currency.chainClient) {
+            prms.push(this.connectChainClient(currency.chainClient));
           }
-        }
-      }
 
-      await this.walletManager.init();
+          prms.concat(
+            [currency.lndClient, currency.clnClient]
+              .filter(
+                (client): client is ClnClient | LndClient =>
+                  client !== undefined,
+              )
+              .map((client) => this.connectLightningClient(client)),
+          );
+
+          return prms;
+        }),
+      );
+
+      await this.walletManager.init(this.config.currencies);
       await this.service.init(this.config.pairs);
 
       await this.service.swapManager.init(Array.from(this.currencies.values()));
@@ -148,10 +188,16 @@ class Boltz {
         return;
       }
 
-      this.logger.verbose(`Starting rescan of chains: ${chainTips.map(chainTip => chainTip.symbol).join(', ')}`);
+      this.logger.verbose(
+        `Starting rescan of chains: ${chainTips
+          .map((chainTip) => chainTip.symbol)
+          .join(', ')}`,
+      );
 
       const logRescan = (chainTip: ChainTip) => {
-        this.logger.debug(`Rescanning ${chainTip.symbol} from height: ${chainTip.height}`);
+        this.logger.debug(
+          `Rescanning ${chainTip.symbol} from height: ${chainTip.height}`,
+        );
       };
 
       const rescanPromises: Promise<void>[] = [];
@@ -160,11 +206,17 @@ class Boltz {
         if (chainTip.symbol === 'ETH') {
           if (this.walletManager.ethereumManager) {
             logRescan(chainTip);
-            rescanPromises.push(this.walletManager.ethereumManager.contractEventHandler.rescan(chainTip.height));
+            rescanPromises.push(
+              this.walletManager.ethereumManager.contractEventHandler.rescan(
+                chainTip.height,
+              ),
+            );
           }
         } else {
           if (!this.currencies.has(chainTip.symbol)) {
-            this.logger.warn(`Not rescanning ${chainTip.symbol} because no chain client was configured`);
+            this.logger.warn(
+              `Not rescanning ${chainTip.symbol} because no chain client was configured`,
+            );
             continue;
           }
 
@@ -211,18 +263,30 @@ class Boltz {
     }
   };
 
-  private connectLnd = async (client: LndClient) => {
-    const service = `${client.symbol} LND`;
+  private connectLightningClient = async (client: LightningClient) => {
+    const service = `${client.symbol} ${client.serviceName()}`;
 
     try {
       await client.connect();
 
       const info = await client.getInfo();
+      VersionCheck.checkLightningVersion(
+        client.serviceName(),
+        client.symbol,
+        info.version,
+      );
 
-      VersionCheck.checkLndVersion(client.symbol, info.version);
-
-      // The featuresMap is just annoying to see on startup
-      info.featuresMap = undefined as any;
+      if (client instanceof ClnClient) {
+        const holdInfo = await client.getHoldInfo();
+        this.logger.verbose(
+          `${client.symbol} ${ClnClient.serviceNameHold} version: ${holdInfo.version}`,
+        );
+        VersionCheck.checkLightningVersion(
+          ClnClient.serviceNameHold,
+          client.symbol,
+          holdInfo.version,
+        );
+      }
 
       this.logStatus(service, info);
     } catch (error) {
@@ -235,26 +299,35 @@ class Boltz {
 
     this.config.currencies.forEach((currency) => {
       try {
-        const chainClient = new ChainClient(this.logger, currency.chain, currency.symbol);
-
-        let lndClient: LndClient | undefined;
-
-        if (currency.lnd) {
-          lndClient = new LndClient(this.logger, currency.symbol, currency.lnd);
-        }
+        const chainClient = new ChainClient(
+          this.logger,
+          currency.chain,
+          currency.symbol,
+        );
 
         result.set(currency.symbol, {
-          lndClient,
           chainClient,
           symbol: currency.symbol,
           type: CurrencyType.BitcoinLike,
           network: Networks[currency.network],
+          lndClient:
+            currency.lnd !== undefined
+              ? new LndClient(this.logger, currency.symbol, currency.lnd)
+              : undefined,
+          clnClient:
+            currency.cln !== undefined
+              ? new ClnClient(this.logger, currency.symbol, currency.cln)
+              : undefined,
           limits: {
             ...currency,
           },
         });
       } catch (error) {
-        this.logger.error(`Could not initialize currency ${currency.symbol}: ${(error as any).message}`);
+        this.logger.error(
+          `Could not initialize currency ${currency.symbol}: ${
+            (error as any).message
+          }`,
+        );
       }
     });
 
@@ -269,11 +342,26 @@ class Boltz {
       });
     });
 
+    if (this.config.liquid) {
+      const { symbol, chain, network } = this.config.liquid;
+      result.set(symbol, {
+        type: CurrencyType.Liquid,
+        symbol: symbol,
+        network: LiquidNetworks[network],
+        chainClient: new ElementsClient(this.logger, chain),
+        limits: {
+          ...this.config.liquid,
+        },
+      });
+    }
+
     return result;
   };
 
   private logStatus = (service: string, status: unknown) => {
-    this.logger.verbose(`${service} status: ${JSON.stringify(status, undefined, 2)}`);
+    this.logger.verbose(
+      `${service} status: ${JSON.stringify(status, undefined, 2)}`,
+    );
   };
 
   private logCouldNotConnect = (service: string, error: any) => {

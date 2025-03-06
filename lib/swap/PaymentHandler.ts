@@ -132,7 +132,7 @@ class PaymentHandler {
 
     try {
       const cltvLimit = await this.timeoutDeltaProvider.getCltvLimit(swap);
-      if (cltvLimit < 2) {
+      if (cltvLimit < 144) {
         throw PaymentHandler.errCltvTooSmall;
       }
 
@@ -242,7 +242,8 @@ class PaymentHandler {
         LndClient.formatPaymentFailureReason(
           PaymentFailureReason.FAILURE_REASON_INCORRECT_PAYMENT_DETAILS,
         ) ||
-      LightningNursery.errIsInvoiceExpired(errorMessage)
+      LightningNursery.errIsInvoiceExpired(errorMessage) ||
+      errorMessage === PaymentHandler.errCltvTooSmall
     ) {
       await this.abandonSwap(swap, errorMessage);
       return undefined;

@@ -7,7 +7,7 @@ authors.workspace = true
 edition.workspace = true
 
 [features]
-default = ["metrics", "loki", "otel"]
+default = ["metrics", "loki"]
 metrics = [
 	"dep:metrics",
 	"dep:axum-prometheus",
